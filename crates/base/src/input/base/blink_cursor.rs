@@ -4,11 +4,8 @@ use instant::Duration;
 static INTERVAL: Duration = Duration::from_millis(500);
 static PAUSE_DELAY: Duration = Duration::from_millis(300);
 
-// On Windows, Linux, we should use integer to avoid blurry cursor.
-#[cfg(not(target_os = "macos"))]
-pub(super) const CURSOR_WIDTH: Pixels = px(2.);
-#[cfg(target_os = "macos")]
-pub(super) const CURSOR_WIDTH: Pixels = px(1.5);
+/// CDXC:DesignSystem 2026-10-12 DECISION: User: "please make the caret everywhere in the app, especially in the chat view composer 1px width not wider". The text caret of every kit Input, Textarea and editor field (chat composer, modals, Settings, Find, rename, search) is one logical pixel on every platform, the same hairline the rest of the UI uses, so on a 1.5x or 2x display it is 1.5 or 2 device pixels. This replaces upstream's 2px (Windows, Linux) and 1.5px (macOS). The terminal's cursor is not drawn here and follows the terminal's own cursor style; the Docs editor (`zorite-editor`) already draws a 1px caret.
+pub(super) const CURSOR_WIDTH: Pixels = px(1.);
 
 /// To manage the Input cursor blinking.
 ///
