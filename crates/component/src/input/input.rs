@@ -451,9 +451,11 @@ impl Input {
     /// Intercept paste payloads (images, files) before the default text insertion.
     ///
     /// The handler receives the clipboard item and returns whether it took the
-    /// paste: `true` stops the `input::Paste` action so the input inserts
-    /// nothing, `false` lets it reach the engine, which inserts
-    /// `clipboard.text()` as today. Text stays in the `Rope`; images and
+    /// paste: `true` means the input inserts nothing, `false` lets the engine
+    /// insert `clipboard.text()` as today. The engine reads the clipboard
+    /// once per `input::Paste`, off the UI thread where the platform's read
+    /// can block, and calls the handler after its own update, so the handler
+    /// may read the input. Text stays in the `Rope`; images and
     /// copied files (`ClipboardEntry::Image`, `ClipboardEntry::ExternalPaths`)
     /// belong in app-owned state beside the input (e.g. `Attachment`s), never
     /// inside it.
@@ -759,9 +761,10 @@ impl RenderOnce for Input {
             .paste_handler
             .clone()
             .filter(|_| state.presentation(cx).is_editable());
-        // A platform paste (the web) reaches the engine without the Paste
-        // action, so the engine offers it to the same handler.
-        state.install_paste_hook(paste_handler.clone(), cx);
+        // The engine offers every paste to the handler: the `Paste` action's
+        // one clipboard read, and a platform paste (the web) that reaches it
+        // without the action.
+        state.install_paste_hook(paste_handler, cx);
         let mut overlays = state.render_overlays(window, cx);
         overlays
             .floating
@@ -939,15 +942,6 @@ impl RenderOnce for Input {
             })
             .relative()
             .children(overlays.floating)
-            .when_some(paste_handler, |this, handler| {
-                this.capture_action(move |_: &gpui_base::input::Paste, window, cx| {
-                    if let Some(clipboard) = cx.read_from_clipboard() {
-                        if handler(&clipboard, window, cx) {
-                            cx.stop_propagation();
-                        }
-                    }
-                })
-            })
             .render(window, cx)
     }
 }

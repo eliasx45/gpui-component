@@ -2,6 +2,7 @@
 //!
 //! Based on the `Input` example from the `gpui` crate.
 //! https://github.com/zed-industries/zed/blob/main/crates/gpui/examples/input.rs
+use futures::FutureExt as _;
 use gpui::TextAlign;
 use gpui::{
     Action, App, AppContext, Bounds, ClipboardItem, Context, Edges, Entity, EntityInputHandler,
@@ -2794,30 +2795,40 @@ impl<M: InputModeKind> InputBaseState<M> {
         if !self.is_editable() {
             return;
         }
-        if let Some(clipboard) = cx.read_from_clipboard() {
-            self.insert_clipboard(clipboard, window, cx);
+        // One read serves the styled control's paste hook and the text
+        // insertion. It is never the synchronous read: on Windows that blocks
+        // the UI thread while the source app renders a format on demand (up
+        // to 30 seconds when the app is busy), and on the web it is always
+        // empty. Platforms that read synchronously hand back a finished task,
+        // which still pastes at once. The read has to start here, still
+        // inside the user activation that dispatched `Paste`, or the browser
+        // refuses it.
+        let read = cx.read_from_clipboard_async();
+        if read.is_ready() {
+            match read.now_or_never() {
+                Some(Ok(Some(clipboard))) => self.offer_paste(clipboard, window, cx),
+                Some(Err(error)) => {
+                    tracing::warn!("failed to read the clipboard for paste: {error}")
+                }
+                Some(Ok(None)) | None => {}
+            }
             return;
         }
-        // The synchronous read is empty on platforms whose clipboard is
-        // asynchronous and permission-gated (the web), so fall back to the
-        // real read. It has to start here, still inside the user activation
-        // that dispatched `Paste`, or the browser refuses the read.
-        let read = cx.read_from_clipboard_async();
         let target = self.paste_target();
         cx.spawn_in(window, async move |this, cx| match read.await {
             Ok(Some(clipboard)) => {
                 this.update_in(cx, |this, window, cx| {
-                    // The read can sit behind a permission prompt for as
-                    // long as the user likes. If they edited, moved the
-                    // caret or left the input meanwhile, the paste would
-                    // land where they no longer mean it to; drop it, as the
-                    // browser's own paste event only reaches the focused
-                    // input too.
+                    // The read can sit behind a permission prompt, or a
+                    // source app slow to render, for as long as it likes. If
+                    // the user edited, moved the caret or left the input
+                    // meanwhile, the paste would land where they no longer
+                    // mean it to; drop it, as the browser's own paste event
+                    // only reaches the focused input too.
                     if this.is_editable()
                         && this.focus_handle.is_focused(window)
                         && this.paste_target() == target
                     {
-                        this.insert_clipboard(clipboard, window, cx);
+                        this.offer_paste(clipboard, window, cx);
                     }
                 })
                 .ok();
@@ -2826,6 +2837,31 @@ impl<M: InputModeKind> InputBaseState<M> {
             Err(error) => tracing::warn!("failed to read the clipboard for paste: {error}"),
         })
         .detach();
+    }
+
+    /// Hands a `Paste` action's clipboard to the styled control's paste hook,
+    /// then inserts its text unless the hook took it. The hook runs after
+    /// this update, as for a platform paste, because hosts read the field
+    /// while handling a paste.
+    fn offer_paste(
+        &mut self,
+        clipboard: ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(hook) = self.paste_hook.clone() else {
+            self.insert_clipboard(clipboard, window, cx);
+            return;
+        };
+        let state = cx.entity();
+        window.defer(cx, move |window, cx| {
+            if hook(&clipboard, window, cx) {
+                return;
+            }
+            state.update(cx, |state, cx| {
+                state.insert_clipboard(clipboard, window, cx)
+            });
+        });
     }
 
     /// Where a paste would go right now: the document as edited so far and
