@@ -1400,10 +1400,12 @@ impl Paragraph {
                     mark_highlight(style, marked_text(&inline_node.text, range), node_cx, cx);
                 if let Some(link_mark) = style.link.clone() {
                     highlight.style.color = Some(node_cx.style.link());
-                    highlight.style.underline = Some(gpui::UnderlineStyle {
-                        thickness: gpui::px(1.),
-                        ..Default::default()
-                    });
+                    if node_cx.style.link_underline() {
+                        highlight.style.underline = Some(gpui::UnderlineStyle {
+                            thickness: gpui::px(1.),
+                            ..Default::default()
+                        });
+                    }
                     links.push((inner_range.clone(), link_mark));
                 }
                 node_highlights.push((inner_range, highlight));
@@ -2699,10 +2701,12 @@ impl Paragraph {
 
                     if let Some(mut link_mark) = style.link.clone() {
                         highlight.style.color = Some(node_cx.style.link());
-                        highlight.style.underline = Some(gpui::UnderlineStyle {
-                            thickness: gpui::px(1.),
-                            ..Default::default()
-                        });
+                        if node_cx.style.link_underline() {
+                            highlight.style.underline = Some(gpui::UnderlineStyle {
+                                thickness: gpui::px(1.),
+                                ..Default::default()
+                            });
+                        }
 
                         // convert link references, replace link
                         if let Some(identifier) = link_mark.identifier.as_ref() {
@@ -2845,10 +2849,12 @@ impl Paragraph {
                                 .clone(),
                         );
                         object_style.color = Some(node_cx.style.link());
-                        object_style.underline = Some(gpui::UnderlineStyle {
-                            thickness: px(1.),
-                            ..Default::default()
-                        });
+                        if node_cx.style.link_underline() {
+                            object_style.underline = Some(gpui::UnderlineStyle {
+                                thickness: px(1.),
+                                ..Default::default()
+                            });
+                        }
                     }
                 }
                 let rendered_node = node.clone();
@@ -2917,10 +2923,12 @@ impl Paragraph {
 
                     if let Some(mut link_mark) = style.link.clone() {
                         highlight.style.color = Some(node_cx.style.link());
-                        highlight.style.underline = Some(gpui::UnderlineStyle {
-                            thickness: gpui::px(1.),
-                            ..Default::default()
-                        });
+                        if node_cx.style.link_underline() {
+                            highlight.style.underline = Some(gpui::UnderlineStyle {
+                                thickness: gpui::px(1.),
+                                ..Default::default()
+                            });
+                        }
 
                         if let Some(identifier) = link_mark.identifier.as_ref()
                             && let Some(mark) = node_cx.link_refs.get(identifier)

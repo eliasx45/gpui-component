@@ -112,6 +112,8 @@ pub struct TextViewStyle {
     /// Link text color. `None` keeps the theme's `link`, which is wrong for a
     /// document drawn in a different light/dark mode than the app theme.
     pub link: Option<Hsla>,
+    /// Whether links are underlined. Default `true`.
+    pub link_underline: bool,
     /// Whether content-specific rendering should use dark-mode assets.
     pub is_dark: bool,
 }
@@ -143,6 +145,7 @@ impl Default for TextViewStyle {
             default_cursor: false,
             strong_weight: FontWeight::BOLD,
             link: None,
+            link_underline: true,
             is_dark: false,
         }
     }
@@ -181,6 +184,7 @@ impl PartialEq for TextViewStyle {
             && self.default_cursor == other.default_cursor
             && self.strong_weight == other.strong_weight
             && self.link == other.link
+            && self.link_underline == other.link_underline
             && self.is_dark == other.is_dark
     }
 }

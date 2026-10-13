@@ -47,6 +47,8 @@ pub struct TextViewStyle {
     foreground: Hsla,
     muted_foreground: Hsla,
     link: Hsla,
+    // Ghostex fork: whether links are underlined (the chat draws them by color alone).
+    link_underline: bool,
     selection: Hsla,
     code_background: Hsla,
     border: Hsla,
@@ -83,6 +85,7 @@ impl PartialEq for TextViewStyle {
             && self.foreground == other.foreground
             && self.muted_foreground == other.muted_foreground
             && self.link == other.link
+            && self.link_underline == other.link_underline
             && self.selection == other.selection
             && self.code_background == other.code_background
             && self.border == other.border
@@ -134,6 +137,7 @@ impl TextViewStyle {
             foreground: colors.foreground,
             muted_foreground: colors.muted_foreground,
             link: colors.primary,
+            link_underline: true,
             selection: colors.selection,
             code_background: colors.accent,
             border: colors.border,
@@ -179,6 +183,12 @@ impl TextViewStyle {
     /// Sets the link text color.
     pub fn with_link(mut self, color: Hsla) -> Self {
         self.link = color;
+        self
+    }
+
+    /// Sets whether links are underlined (default `true`).
+    pub fn with_link_underline(mut self, underline: bool) -> Self {
+        self.link_underline = underline;
         self
     }
 
@@ -385,6 +395,11 @@ impl TextViewStyle {
     /// The link text color.
     pub fn link(&self) -> Hsla {
         self.link
+    }
+
+    /// Whether links are underlined.
+    pub fn link_underline(&self) -> bool {
+        self.link_underline
     }
 
     /// The background painted behind selected text.
