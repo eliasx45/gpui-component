@@ -190,10 +190,21 @@ pub(crate) fn init(cx: &mut App) {
                 },
             ),
         ),
+        // `secondary-` is fixed at compile time; spell it out so `MacTextKeys` decides.
         (
-            true,
+            mac,
             key(
-                "secondary-enter",
+                "cmd-enter",
+                Enter {
+                    secondary: true,
+                    shift: false,
+                },
+            ),
+        ),
+        (
+            !mac,
+            key(
+                "ctrl-enter",
                 Enter {
                     secondary: true,
                     shift: false,
