@@ -4,9 +4,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, AnyView, App, ClickEvent, Hsla, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, Pixels, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px, svg,
+    AnyElement, AnyView, App, ClickEvent, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    MouseButton, ParentElement as _, Pixels, SharedString, Size, StatefulInteractiveElement as _,
+    Styled as _, Window, div, prelude::FluentBuilder as _, px, svg,
 };
 
 use super::{
@@ -23,10 +23,11 @@ use super::{
 /// Returned by [`TextView::link_presentation`](super::TextView::link_presentation)
 /// for a link it should draw as a chip: `icon` then `label` in `color`,
 /// `gap` apart, with `title` as its tooltip.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct InlineLink {
     pub label: SharedString,
     pub title: SharedString,
+    /// Empty for a chip without an icon (give it a zero `icon_size` and `gap`).
     pub icon: SharedString,
     pub icon_size: Pixels,
     pub gap: Pixels,
@@ -34,6 +35,35 @@ pub struct InlineLink {
     /// Ellipsize from the start when the chip is wider than the line, so a
     /// path keeps its file name visible.
     pub truncate_start: bool,
+    /// Ghostex fork: an outlined box around the chip, or none.
+    pub frame: Option<InlineLinkFrame>,
+    /// Ghostex fork: the label's weight, when it differs from the line's.
+    pub font_weight: Option<FontWeight>,
+    /// Ghostex fork: the label is struck through.
+    pub strikethrough: bool,
+}
+
+/// Ghostex fork: the outlined box a chip can sit in (a chat's question tags):
+/// `padding_x` inside a `border_width` edge on both ends, `radius` corners,
+/// and a fill only under the pointer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InlineLinkFrame {
+    pub padding_x: Pixels,
+    pub border_width: Pixels,
+    pub border_color: Hsla,
+    pub radius: Pixels,
+    pub hover_background: Option<Hsla>,
+}
+
+impl InlineLink {
+    /// The room the chip adds around its label: the icon and its gap, and the
+    /// frame's padding and edges on both ends.
+    pub(super) fn extra_width(&self) -> Pixels {
+        let frame = self.frame.as_ref().map_or(Pixels::ZERO, |frame| {
+            (frame.padding_x + frame.border_width) * 2.
+        });
+        self.icon_size + self.gap + frame
+    }
 }
 
 pub(crate) type LinkPresentationFn = dyn Fn(&str, &str) -> Option<InlineLink> + Send + Sync;
@@ -138,6 +168,13 @@ pub(super) fn split_references(
                     0..len,
                     InlineHighlight::from(gpui::HighlightStyle {
                         color: Some(presentation.color),
+                        font_weight: presentation.font_weight,
+                        strikethrough: presentation.strikethrough.then(|| {
+                            gpui::StrikethroughStyle {
+                                thickness: px(1.),
+                                color: Some(presentation.color),
+                            }
+                        }),
                         ..Default::default()
                     }),
                 )],
@@ -182,6 +219,7 @@ pub(super) fn element(
     let aux_handler = handler.clone();
     let has_secondary = secondary.is_some();
     let title = reference.title.clone();
+    let label_width = (size.width - reference.extra_width()).max(px(0.));
     div()
         .id(("inline-link", id))
         .role(gpui::Role::Link)
@@ -193,21 +231,32 @@ pub(super) fn element(
         .items_center()
         .gap(reference.gap)
         .text_color(reference.color)
+        .when_some(reference.frame.as_ref(), |this, frame| {
+            this.px(frame.padding_x)
+                .border(frame.border_width)
+                .border_color(frame.border_color)
+                .rounded(frame.radius)
+                .when_some(frame.hover_background, |this, fill| {
+                    this.hover(move |style| style.bg(fill))
+                })
+        })
         .when(!default_cursor, |this| this.cursor_pointer())
         .whitespace_nowrap()
         .when_some(tooltip, |this, tooltip| {
             this.tooltip(move |window, cx| tooltip(title.clone(), window, cx))
         })
-        .child(
-            svg()
-                .path(reference.icon.clone())
-                .size(reference.icon_size)
-                .text_color(reference.color)
-                .flex_shrink_0(),
-        )
+        .when(!reference.icon.is_empty(), |this| {
+            this.child(
+                svg()
+                    .path(reference.icon.clone())
+                    .size(reference.icon_size)
+                    .text_color(reference.color)
+                    .flex_shrink_0(),
+            )
+        })
         .child(
             div()
-                .w((size.width - reference.icon_size - reference.gap).max(px(0.)))
+                .w(label_width)
                 .min_w_0()
                 .overflow_hidden()
                 .child(inline),

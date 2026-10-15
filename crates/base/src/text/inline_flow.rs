@@ -1158,7 +1158,7 @@ fn layout_measured_flow(
                     // label, narrowed to the line when it is wider than it.
                     let runs = text_runs(text.len(), text_style, highlights);
                     let shaped_line = shape_line(text.clone(), font_size, &runs, window);
-                    let natural = shaped_line.width() + reference.icon_size + reference.gap;
+                    let natural = shaped_line.width() + reference.extra_width();
                     let clamped = wrap_width.is_some_and(|wrap_width| natural > wrap_width);
                     let width = match wrap_width {
                         Some(wrap_width) if clamped => wrap_width,
@@ -1587,8 +1587,7 @@ fn line_ranges(
                                 None,
                             )
                             .width
-                            + reference.icon_size
-                            + reference.gap;
+                            + reference.extra_width();
                         wrap_fragments
                             .push(WrapLineFragment::element(width.min(wrap_width), text.len()));
                     }
