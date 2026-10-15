@@ -169,6 +169,8 @@ pub struct Input {
     aria_label: Option<SharedString>,
     placeholder_color: Option<Hsla>,
     caret_color: Option<Hsla>,
+    gutter_background: Option<Hsla>,
+    active_line_background: Option<Hsla>,
     scrollbar_thickness: Option<gpui::Pixels>,
     scrollbar_show: Option<crate::scroll::ScrollbarMode>,
 
@@ -285,6 +287,8 @@ impl Input {
             aria_label: None,
             placeholder_color: None,
             caret_color: None,
+            gutter_background: None,
+            active_line_background: None,
             scrollbar_thickness: None,
             scrollbar_show: None,
             context_menu_builder: None,
@@ -326,6 +330,21 @@ impl Input {
     /// than the theme's (the theme's caret can vanish against it).
     pub fn caret_color(mut self, color: impl Into<Hsla>) -> Self {
         self.caret_color = Some(color.into());
+        self
+    }
+
+    /// Override the line-number gutter's fill, which otherwise comes from the
+    /// theme. A see-through fill (a window with a translucent backdrop) works:
+    /// sideways-scrolled text is clipped at the gutter's edge.
+    pub fn gutter_background(mut self, color: impl Into<Hsla>) -> Self {
+        self.gutter_background = Some(color.into());
+        self
+    }
+
+    /// Override the current line's highlight, which otherwise comes from the
+    /// theme.
+    pub fn active_line_background(mut self, color: impl Into<Hsla>) -> Self {
+        self.active_line_background = Some(color.into());
         self
     }
 
@@ -642,8 +661,16 @@ impl RenderOnce for Input {
                 },
                 highlight_styles: cx.theme().highlight_theme.clone(),
                 editor_invisible: cx.theme().highlight_theme.style.editor_invisible,
-                editor_active_line: cx.theme().highlight_theme.style.editor_active_line,
-                editor_gutter_background: cx.theme().highlight_theme.style.editor_gutter_background,
+                editor_active_line: self.active_line_background.or(cx
+                    .theme()
+                    .highlight_theme
+                    .style
+                    .editor_active_line),
+                editor_gutter_background: self.gutter_background.or(cx
+                    .theme()
+                    .highlight_theme
+                    .style
+                    .editor_gutter_background),
                 fold_icon_renderer: Some(Rc::new(|ix, is_folded| {
                     Button::new(("fold-icon", ix))
                         .ghost()

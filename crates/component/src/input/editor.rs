@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, DefiniteLength, Entity, IntoElement, RenderOnce, SharedString, StyleRefinement, Styled,
-    Window, prelude::FluentBuilder as _, relative,
+    App, DefiniteLength, Entity, Hsla, IntoElement, RenderOnce, SharedString, StyleRefinement,
+    Styled, Window, prelude::FluentBuilder as _, relative,
 };
 
 use super::{EditorState, Input};
@@ -27,6 +27,8 @@ pub struct Editor {
     role: RoleOverride,
     aria_label: Option<SharedString>,
     scrollbar_show: Option<crate::scroll::ScrollbarMode>,
+    gutter_background: Option<Hsla>,
+    active_line_background: Option<Hsla>,
 
     /// An optional context menu builder to allow a custom context menu.
     ///
@@ -50,6 +52,8 @@ impl Editor {
             role: RoleOverride::default(),
             aria_label: None,
             scrollbar_show: None,
+            gutter_background: None,
+            active_line_background: None,
             context_menu_builder: None,
             paste_handler: None,
         }
@@ -104,6 +108,18 @@ impl Editor {
     /// [`ScrollbarMode`](crate::scroll::ScrollbarMode).
     pub fn scrollbar_show(mut self, mode: crate::scroll::ScrollbarMode) -> Self {
         self.scrollbar_show = Some(mode);
+        self
+    }
+
+    /// Override the line-number gutter's fill; see [`Input::gutter_background`].
+    pub fn gutter_background(mut self, color: impl Into<Hsla>) -> Self {
+        self.gutter_background = Some(color.into());
+        self
+    }
+
+    /// Override the current line's highlight; see [`Input::active_line_background`].
+    pub fn active_line_background(mut self, color: impl Into<Hsla>) -> Self {
+        self.active_line_background = Some(color.into());
         self
     }
 
@@ -162,6 +178,12 @@ impl RenderOnce for Editor {
             .when_some(self.height, |this, height| this.h(height))
             .when_some(self.aria_label, |this, label| this.aria_label(label))
             .when_some(self.scrollbar_show, |this, mode| this.scrollbar_show(mode))
+            .when_some(self.gutter_background, |this, color| {
+                this.gutter_background(color)
+            })
+            .when_some(self.active_line_background, |this, color| {
+                this.active_line_background(color)
+            })
             .when_some(self.context_menu_builder, |this, build| {
                 this.context_menu(move |menu, window, cx| build(menu, window, cx))
             })
