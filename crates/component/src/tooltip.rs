@@ -1,9 +1,10 @@
 use std::{cell::Cell, rc::Rc, time::Duration};
 
 use gpui::{
-    Action, AnyElement, AnyView, App, AppContext, Bounds, Context, ElementId, IntoElement,
-    MouseButton, ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement,
-    StyleRefinement, Styled, Window, div, prelude::FluentBuilder, px, rems,
+    Action, AnyElement, AnyView, App, AppContext, Bounds, Context, ElementId, FontWeight,
+    IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
+    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, prelude::FluentBuilder, px,
+    relative, rems,
 };
 pub use gpui_base::TooltipDefaults;
 use gpui_base::{
@@ -52,13 +53,49 @@ enum TooltipContext {
     Element(Box<dyn Fn(&mut Window, &mut App) -> AnyElement>),
 }
 
+/// Ghostex: one gesture row under a tooltip's title ("Interrupt and send now" with its keys).
+#[derive(Clone, Debug)]
+pub struct TooltipRow {
+    label: SharedString,
+    keys: Option<SharedString>,
+    hint: Option<SharedString>,
+}
+
+impl TooltipRow {
+    pub fn new(label: impl Into<SharedString>) -> Self {
+        Self {
+            label: label.into(),
+            keys: None,
+            hint: None,
+        }
+    }
+
+    /// The row's shortcut as the app writes it ("⌃Enter", "Ctrl+Alt+M"), drawn as one key cap
+    /// per key on the right. An empty chord draws nothing, so an unbound hotkey needs no branch.
+    pub fn keys(mut self, chord: impl Into<SharedString>) -> Self {
+        self.keys = Some(chord.into()).filter(|chord| !chord.trim().is_empty());
+        self
+    }
+
+    /// A gesture that is not a key ("Right-click"), drawn as muted text on the right.
+    pub fn hint(mut self, text: impl Into<SharedString>) -> Self {
+        self.hint = Some(text.into());
+        self
+    }
+}
+
 /// A Tooltip element that can display text or custom content,
 /// with optional key binding information.
+///
+/// CDXC:Tooltips 2026-10-15 DECISION:
+/// User picked "mini menu + frosted glass (when transparency enabled)" for every tooltip in the app: a compact title row, then one row per gesture or shortcut ([`Tooltip::row`]) with its keys right-aligned as small key caps ([`Tooltip::keys`], [`TooltipRow::keys`]), like a little menu. A plain-text tooltip is a single-row mini menu. Under window glass the bubble is the frosted menus' material (the desktop's `frosted_tooltip_fill`); otherwise it is the solid dark tooltip colour. Shortcuts move out of the sentence into key caps, so call sites pass rows instead of "Send (^Enter interrupts…, right-click for more)".
 pub struct Tooltip {
     style: StyleRefinement,
     content: TooltipContext,
     key_binding: Option<Kbd>,
     action: Option<(Box<dyn Action>, Option<SharedString>)>,
+    keys: Option<SharedString>,
+    rows: Vec<TooltipRow>,
 }
 
 impl Tooltip {
@@ -69,6 +106,8 @@ impl Tooltip {
             content: TooltipContext::Text(text.into()),
             key_binding: None,
             action: None,
+            keys: None,
+            rows: Vec::new(),
         }
     }
 
@@ -82,6 +121,8 @@ impl Tooltip {
             style: StyleRefinement::default(),
             key_binding: None,
             action: None,
+            keys: None,
+            rows: Vec::new(),
             content: TooltipContext::Element(Box::new(move |window, cx| {
                 builder(window, cx).into_any_element()
             })),
@@ -100,6 +141,26 @@ impl Tooltip {
         self
     }
 
+    /// Ghostex: the title's shortcut as the app writes it ("⌥⌃M"), drawn as key caps on the
+    /// title row's right. Takes precedence over [`Tooltip::key_binding`] and [`Tooltip::action`];
+    /// an empty chord draws nothing.
+    pub fn keys(mut self, chord: impl Into<SharedString>) -> Self {
+        self.keys = Some(chord.into()).filter(|chord| !chord.trim().is_empty());
+        self
+    }
+
+    /// Ghostex: adds a gesture row under the title.
+    pub fn row(mut self, row: TooltipRow) -> Self {
+        self.rows.push(row);
+        self
+    }
+
+    /// Ghostex: adds gesture rows under the title.
+    pub fn rows(mut self, rows: impl IntoIterator<Item = TooltipRow>) -> Self {
+        self.rows.extend(rows);
+        self
+    }
+
     /// Build the tooltip and return it as an `AnyView`.
     pub fn build(self, _: &mut Window, cx: &mut App) -> AnyView {
         cx.new(|_| self).into()
@@ -114,19 +175,20 @@ impl Styled for Tooltip {
 }
 impl Render for Tooltip {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let key_binding = if let Some(key_binding) = &self.key_binding {
-            Some(key_binding.clone())
-        } else {
-            if let Some((action, context)) = &self.action {
-                Kbd::binding_for_action(
-                    action.as_ref(),
-                    context.as_ref().map(|s| s.as_ref()),
-                    window,
-                )
-            } else {
-                None
-            }
-        };
+        let title_keys: Option<SharedString> = self.keys.clone().or_else(|| {
+            self.key_binding
+                .clone()
+                .or_else(|| {
+                    self.action.as_ref().and_then(|(action, context)| {
+                        Kbd::binding_for_action(
+                            action.as_ref(),
+                            context.as_ref().map(|s| s.as_ref()),
+                            window,
+                        )
+                    })
+                })
+                .map(|kbd| Kbd::format(kbd.keystroke()).into())
+        });
 
         // The wrapper must be a flex container: block layout collapses the
         // bubble's vertical margins, so the overlay positioner would measure a
@@ -141,6 +203,62 @@ impl Render for Tooltip {
         // The wrapper reports the bubble's laid-out frame (its only child, borders included). A canvas inside the bubble, the obvious way, sits at the bubble's content origin because an absolute child without insets keeps its static position, so the blur ran one padding plus border to the right of the bubble and the bubble no longer matched its text.
         let frosted = window.frosted_surface();
         let measure = text_measure(&self.style, window);
+        let foreground = cx.theme().popover_foreground;
+        let text_content = matches!(self.content, TooltipContext::Text(_));
+        let title = div()
+            .min_w_0()
+            .when(text_content, |this| this.font_weight(FontWeight::MEDIUM))
+            .map(|this| match self.content {
+                TooltipContext::Text(ref text) => this.max_w(measure).child(text.clone()),
+                TooltipContext::Element(ref builder) => this.child(builder(window, cx)),
+            });
+        // A text tooltip is a mini menu: every row, the title too, carries the menu row's inset
+        // inside the bubble's thin frame. Custom content keeps one inset of the same total size,
+        // so callers that set their own bubble padding (the sidebar's cards) keep it.
+        let row_shell = |first: bool| {
+            div()
+                .flex()
+                .min_w_0()
+                .items_center()
+                .justify_between()
+                .gap_4()
+                .px(px(TOOLTIP_ROW_PADDING_X))
+                .py(px(TOOLTIP_ROW_PADDING_Y))
+                .when(!first, |this| {
+                    this.border_t_1().border_color(foreground.opacity(0.06))
+                })
+        };
+        let title_row = if text_content || title_keys.is_some() || !self.rows.is_empty() {
+            row_shell(true)
+                .child(title)
+                .when_some(title_keys, |this, keys| this.child(key_caps(&keys, cx)))
+                .into_any_element()
+        } else {
+            title.into_any_element()
+        };
+        let mini_menu = text_content || !self.rows.is_empty();
+        let rows = self.rows.iter().map(|row| {
+            row_shell(false)
+                .child(
+                    div()
+                        .min_w_0()
+                        .max_w(measure)
+                        .text_color(foreground.opacity(0.68))
+                        .child(row.label.clone()),
+                )
+                .when_some(row.keys.clone(), |this, keys| {
+                    this.child(key_caps(&keys, cx))
+                })
+                .when_some(row.hint.clone(), |this, hint| {
+                    this.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(rems(0.71875))
+                            .text_color(foreground.opacity(0.5))
+                            .child(hint),
+                    )
+                })
+        });
         div()
             .flex()
             .min_w_0()
@@ -152,13 +270,16 @@ impl Render for Tooltip {
                 })
             })
             .child(
+                // CDXC:Tooltips 2026-10-15 WHY:
+                // The bubble is a block, not a column flex box: a column flex box measures its
+                // rows at their min-content width, which with min-width 0 down to the text (the
+                // 2026-09-24 note above) collapsed every title to one character per line.
                 BaseTooltip::new("tooltip-popup")
-                    .h_flex()
                     .min_w_0()
                     .font_family(cx.theme().font_family.clone())
                     .mx_3()
                     .my_2()
-                    .text_color(cx.theme().popover_foreground)
+                    .text_color(foreground)
                     .map(|this| {
                         if frosted {
                             this.bg(cx.theme().tokens.popover.opacity(frosted_tooltip_alpha()))
@@ -169,31 +290,88 @@ impl Render for Tooltip {
                     .border_1()
                     .border_color(cx.theme().border)
                     .rounded(px(TOOLTIP_RADIUS))
-                    .justify_between()
-                    .py_0p5()
-                    .px_2()
-                    .text_sm()
-                    .gap_3()
-                    .refine_style(&self.style)
                     .map(|this| {
-                        this.child(div().min_w_0().map(|this| match self.content {
-                            TooltipContext::Text(ref text) => {
-                                this.max_w(measure).child(text.clone())
-                            }
-                            TooltipContext::Element(ref builder) => this.child(builder(window, cx)),
-                        }))
+                        if mini_menu {
+                            this.p(px(TOOLTIP_PADDING))
+                        } else {
+                            this.px(px(TOOLTIP_PADDING + TOOLTIP_ROW_PADDING_X))
+                                .py(px(TOOLTIP_PADDING + TOOLTIP_ROW_PADDING_Y))
+                        }
                     })
-                    .when_some(key_binding, |this, kbd| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .flex_shrink_0()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(kbd.appearance(false)),
-                        )
-                    }),
+                    .text_size(rems(TOOLTIP_TEXT_REMS))
+                    .line_height(relative(1.4))
+                    .refine_style(&self.style)
+                    .child(title_row)
+                    .children(rows),
             )
     }
+}
+
+/// Ghostex: the mini menu's frame around its rows, and each row's own inset.
+const TOOLTIP_PADDING: f32 = 4.;
+const TOOLTIP_ROW_PADDING_X: f32 = 7.;
+const TOOLTIP_ROW_PADDING_Y: f32 = 4.;
+
+/// Ghostex: the mini menu's text size, 12.5px at the default 16px rem.
+const TOOLTIP_TEXT_REMS: f32 = 0.78125;
+
+/// Ghostex: a chord as the app writes it, one cap per key: "⌥⌃M" is ⌥ ⌃ M, "⌃Enter" is ⌃ Enter,
+/// "Ctrl+Alt+M" is Ctrl Alt M. Separate chords (a space between them) stay in order.
+fn chord_keys(chord: &str) -> Vec<SharedString> {
+    const MODIFIERS: [char; 5] = ['⌘', '⌃', '⌥', '⇧', '⇪'];
+    let mut keys = Vec::new();
+    for stroke in chord.split_whitespace() {
+        if stroke.chars().count() > 1 && stroke.contains('+') {
+            let mut parts = stroke.split('+').peekable();
+            while let Some(part) = parts.next() {
+                if !part.is_empty() {
+                    keys.push(SharedString::from(part.to_owned()));
+                } else if parts.peek().is_some_and(|next| next.is_empty()) {
+                    // "Ctrl++": the key itself is the plus sign.
+                    parts.next();
+                    keys.push("+".into());
+                }
+            }
+            continue;
+        }
+        let mut rest = String::new();
+        for ch in stroke.chars() {
+            if MODIFIERS.contains(&ch) && rest.is_empty() {
+                keys.push(ch.to_string().into());
+            } else {
+                rest.push(ch);
+            }
+        }
+        if !rest.is_empty() {
+            keys.push(rest.into());
+        }
+    }
+    keys
+}
+
+/// Ghostex: a chord drawn as small key caps, right-aligned in a mini menu row.
+fn key_caps(chord: &str, cx: &App) -> impl IntoElement {
+    let foreground = cx.theme().popover_foreground;
+    div()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap(px(3.))
+        .children(chord_keys(chord).into_iter().map(move |key| {
+            div()
+                .min_w(px(17.))
+                .px(px(4.))
+                .rounded(px(4.))
+                .bg(foreground.opacity(0.1))
+                .border_1()
+                .border_color(foreground.opacity(0.08))
+                .text_center()
+                .text_size(rems(0.6875))
+                .line_height(px(16.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(foreground.opacity(0.82))
+                .child(key)
+        }))
 }
 
 /// Ghostex: the widest a text tooltip's line may run before it wraps.
@@ -203,7 +381,7 @@ impl Render for Tooltip {
 fn text_measure(style: &StyleRefinement, window: &Window) -> Pixels {
     let rem_size = window.rem_size();
     let font_size = style.text.font_size.map_or_else(
-        || rems(0.875).to_pixels(rem_size),
+        || rems(TOOLTIP_TEXT_REMS).to_pixels(rem_size),
         |size| size.to_pixels(rem_size),
     );
     font_size * 30.
