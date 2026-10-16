@@ -228,8 +228,13 @@ impl Render for Tooltip {
                     this.border_t_1().border_color(foreground.opacity(0.06))
                 })
         };
-        let title_row = if text_content || title_keys.is_some() || !self.rows.is_empty() {
+        let title_in_row = text_content || title_keys.is_some() || !self.rows.is_empty();
+        // CDXC:Tooltips 2026-10-17 WHY:
+        // A one-row mini menu centres its row in the bubble instead of stacking it from the top. The row's inset made the content taller than a bubble whose caller fixes its height (the 20px titlebar tooltip), and a block bubble lets the extra spill out of the bottom only, so the text sat low and ran past the bubble's bottom edge. Centred, the row's spare inset overflows evenly and the text line sits in the middle at every zoom; a bubble of natural height is unchanged. It is a row flex box, not a column (the 2026-10-15 note below), so the row keeps its one-line width.
+        let center_single_row = title_in_row && self.rows.is_empty();
+        let title_row = if title_in_row {
             row_shell(true)
+                .when(center_single_row, |this| this.flex_grow(1.))
                 .child(title)
                 .when_some(title_keys, |this, keys| this.child(key_caps(&keys, cx)))
                 .into_any_element()
@@ -276,6 +281,7 @@ impl Render for Tooltip {
                 // 2026-09-24 note above) collapsed every title to one character per line.
                 BaseTooltip::new("tooltip-popup")
                     .min_w_0()
+                    .when(center_single_row, |this| this.flex().items_center())
                     .font_family(cx.theme().font_family.clone())
                     .mx_3()
                     .my_2()
