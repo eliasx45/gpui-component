@@ -17,7 +17,11 @@ use std::{ops::Range, rc::Rc};
 
 use crate::{
     Scrollbar,
-    input::{RopeExt as _, blink_cursor::CURSOR_WIDTH, display_map::LineLayout},
+    input::{
+        RopeExt as _,
+        blink_cursor::CURSOR_WIDTH,
+        display_map::{LineLayout, is_rtl_paragraph},
+    },
 };
 
 use super::{
@@ -774,7 +778,6 @@ impl<M: InputModeKind> TextElement<M> {
             .zip(last_layout.lines.iter())
         {
             let mut offset = line_offset;
-            let alignment = last_layout.alignment_offset(line.longest_width);
             for (row, shaped) in line.wrapped_lines.iter().enumerate() {
                 let end = offset + shaped.len;
                 let start_ix = range.start.max(offset);
@@ -784,15 +787,23 @@ impl<M: InputModeKind> TextElement<M> {
                 // A wrap boundary is not a newline and must not get such a cell.
                 let newline = is_last && range.start <= end && range.end > end;
                 if start_ix < end_ix || newline {
-                    let indent = if row == 0 { px(0.) } else { line.wrap_indent };
-                    let left = alignment + indent + shaped.x_for_index(start_ix.min(end) - offset);
-                    let right = alignment
-                        + indent
-                        + if newline {
-                            shaped.width + last_layout.space_width
-                        } else {
-                            shaped.x_for_index(end_ix - offset)
-                        };
+                    let row_offset = line.row_offset(row, last_layout);
+                    let (mut left, mut right) = if start_ix < end_ix {
+                        shaped.x_span(start_ix - offset..end_ix - offset)
+                    } else if line.is_right_to_left() {
+                        (px(0.), px(0.))
+                    } else {
+                        (shaped.width, shaped.width)
+                    };
+                    // A right-to-left paragraph ends on its left, so its newline cell
+                    // sits left of the row.
+                    if newline && line.is_right_to_left() {
+                        left = left.min(px(0.)) - last_layout.space_width;
+                    } else if newline {
+                        right = shaped.width + last_layout.space_width;
+                    }
+                    let left = row_offset + left;
+                    let right = row_offset + right;
                     corners.push(Corners {
                         top_left: point(left, y),
                         top_right: point(right, y),
@@ -3040,6 +3051,25 @@ impl<M: InputModeKind> Element for TextElement<M> {
             whitespace_indicators,
             window,
         );
+        let lines = if state.auto_text_direction && !is_empty && !state.masked {
+            // Each right-to-left row ends at the right edge, leaving room for the caret.
+            let rtl_align_width =
+                (bounds.size.width - line_number_width - CURSOR_WIDTH).max(px(0.));
+            lines
+                .into_iter()
+                .zip(last_layout.visible_buffer_lines.iter())
+                .map(|(line, &buffer_line)| {
+                    let line_text = display_text.slice_line(buffer_line).to_string();
+                    if is_rtl_paragraph(&line_text) {
+                        line.right_to_left(Some(rtl_align_width))
+                    } else {
+                        line
+                    }
+                })
+                .collect()
+        } else {
+            lines
+        };
 
         let mut longest_line_width = wrap_width.unwrap_or(px(0.));
         // 1. Single line

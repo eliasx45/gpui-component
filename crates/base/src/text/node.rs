@@ -1669,6 +1669,21 @@ impl Paragraph {
         text
     }
 
+    /// Whether the paragraph's first strong character is right-to-left, which
+    /// lays it out right-aligned as a `dir="auto"` block is on the web.
+    pub(super) fn is_right_to_left(&self) -> bool {
+        for node in &self.children {
+            for c in node.text.chars() {
+                match unicode_bidi::bidi_class(c) {
+                    unicode_bidi::BidiClass::L => return false,
+                    unicode_bidi::BidiClass::R | unicode_bidi::BidiClass::AL => return true,
+                    _ => {}
+                }
+            }
+        }
+        false
+    }
+
     /// Synchronously clear the selection stored in every inline state.
     ///
     /// Mirrors the [`selected_text`](Self::selected_text) traversal.
@@ -3425,24 +3440,41 @@ impl BlockNode {
     /// column; `justify_end` is what pushes the marker against that column, the
     /// way CSS's outside marker sits. An invisible copy holds the same column
     /// for the blocks an item holds under its first line.
+    ///
+    /// A right-to-left item mirrors this: the marker sits right of the text, at
+    /// the start of its column, and reads right to left (`.1` rather than `1.`).
     fn list_marker(
         ix: usize,
         options: NodeRenderOptions,
         style: &TextViewStyle,
         invisible: bool,
+        rtl: bool,
     ) -> Div {
+        let prefix = list_item_prefix(
+            ix,
+            options.list_start,
+            options.ordered,
+            options.list_depth(),
+        );
         div()
             .flex()
-            .justify_end()
+            .map(|this| {
+                if rtl {
+                    this.justify_start()
+                } else {
+                    this.justify_end()
+                }
+            })
             .flex_shrink_0()
             .when(invisible, |this| this.invisible())
             .refine_style(style.list_marker())
-            .child(list_item_prefix(
-                ix,
-                options.list_start,
-                options.ordered,
-                options.list_depth(),
-            ))
+            .child(if rtl {
+                // A right-to-left mark makes the marker's own paragraph read right to
+                // left, which puts its trailing space on the left, beside the text.
+                format!("\u{200F}{prefix}")
+            } else {
+                prefix
+            })
     }
 
     /// The column an item's text sits in, beside its marker.
@@ -3477,13 +3509,15 @@ impl BlockNode {
         options: NodeRenderOptions,
         checked: Option<bool>,
         style: &TextViewStyle,
+        rtl: bool,
     ) -> Div {
         h_flex()
             .w_full()
             .min_w_0()
             .items_start()
+            .when(rtl, |this| this.flex_row_reverse())
             .when(!options.todo && checked.is_none(), |this| {
-                this.child(Self::list_marker(ix, options, style, true))
+                this.child(Self::list_marker(ix, options, style, true, rtl))
             })
             .child(Self::list_item_text(content, checked, style))
     }
@@ -3495,6 +3529,7 @@ impl BlockNode {
         checked: Option<bool>,
         style: &TextViewStyle,
         line_height: Pixels,
+        rtl: bool,
     ) -> Div {
         h_flex()
             .w_full()
@@ -3502,8 +3537,9 @@ impl BlockNode {
             .relative()
             .items_start()
             .content_start()
+            .when(rtl, |this| this.flex_row_reverse())
             .when(!options.todo && checked.is_none(), |this| {
-                this.child(Self::list_marker(ix, options, style, false))
+                this.child(Self::list_marker(ix, options, style, false, rtl))
             })
             .when_some(checked, |this, checked| {
                 // Todo list checkbox
@@ -3563,6 +3599,10 @@ impl BlockNode {
                 .when(*spread, |this| this.child(div()))
                 .children({
                     let mut items: Vec<Div> = Vec::with_capacity(children.len());
+                    let rtl = match children.first() {
+                        Some(BlockNode::Paragraph(paragraph)) => paragraph.is_right_to_left(),
+                        _ => false,
+                    };
 
                     for (child_ix, child) in children.iter().enumerate() {
                         match child {
@@ -3594,6 +3634,7 @@ impl BlockNode {
                                                 options,
                                                 *checked,
                                                 &node_cx.style,
+                                                rtl,
                                             ),
                                         ));
                                         continue;
@@ -3607,6 +3648,7 @@ impl BlockNode {
                                     *checked,
                                     &node_cx.style,
                                     window.line_height(),
+                                    rtl,
                                 ));
                             }
                             BlockNode::List { .. } => {
@@ -3658,6 +3700,7 @@ impl BlockNode {
                                         *checked,
                                         &node_cx.style,
                                         window.line_height(),
+                                        rtl,
                                     ));
                                 } else {
                                     // Any other block an item holds belongs to
@@ -3671,6 +3714,7 @@ impl BlockNode {
                                             options,
                                             *checked,
                                             &node_cx.style,
+                                            rtl,
                                         )
                                         .pt(node_cx.style.paragraph_gap()),
                                     );
@@ -4107,15 +4151,24 @@ impl BlockNode {
                     node.render_block(NodeRenderOptions { ix, ..options }, node_cx, window, cx)
                 }))
                 .into_any_element(),
-            BlockNode::Paragraph(paragraph) => gapped(
-                paragraph.render(
+            BlockNode::Paragraph(paragraph) => {
+                let content = paragraph.render(
                     paragraph.span.map(|span| TextLeafKey::block(span.start)),
                     node_cx,
                     window,
                     cx,
-                ),
-                mb,
-            ),
+                );
+                let content = if paragraph.is_right_to_left() {
+                    div()
+                        .w_full()
+                        .text_right()
+                        .child(content)
+                        .into_any_element()
+                } else {
+                    content
+                };
+                gapped(content, mb)
+            }
             BlockNode::Heading {
                 level,
                 children,
@@ -4144,6 +4197,7 @@ impl BlockNode {
                     // heading's extra room above is dropped there (CSS's
                     // `> :first-child { margin-top: 0 }`).
                     .when(options.ix == 0, |this| this.pt(px(0.)))
+                    .when(children.is_right_to_left(), |this| this.text_right())
                     .child(children.render(
                         span.map(|span| TextLeafKey::block(span.start)),
                         node_cx,

@@ -2,10 +2,12 @@ use crate::input::InputModeKind;
 use gpui::{Context, Pixels, Point, Window};
 use sum_tree::Bias;
 
+use crate::actions::{SelectLeft, SelectRight};
 use crate::input::{
     InputBaseState, MoveDown, MoveEnd, MoveHome, MoveLeft, MovePageDown, MovePageUp, MoveRight,
     MoveToEnd, MoveToNextWord, MoveToPreviousWord, MoveToStart, MoveUp, RopeExt as _,
-    cursor::CursorSelection,
+    SelectToNextWordEnd, SelectToPreviousWordStart, cursor::CursorSelection,
+    display_map::is_rtl_paragraph,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -322,6 +324,121 @@ impl<M: InputModeKind> InputBaseState<M> {
             window,
             cx,
         );
+    }
+
+    /// Whether the active caret's line reads right to left, where the horizontal arrow
+    /// keys move the other way through the text, as they do in a browser text field
+    /// with `dir="auto"`.
+    fn cursor_line_is_rtl(&self) -> bool {
+        if !self.auto_text_direction || self.masked {
+            return false;
+        }
+        let row = self.text.offset_to_point(self.cursor()).row;
+        is_rtl_paragraph(&self.text.slice_line(row).to_string())
+    }
+
+    pub(super) fn visual_left(
+        &mut self,
+        _: &MoveLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cursor_line_is_rtl() {
+            self.right(&MoveRight, window, cx);
+        } else {
+            self.left(&MoveLeft, window, cx);
+        }
+    }
+
+    pub(super) fn visual_right(
+        &mut self,
+        _: &MoveRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cursor_line_is_rtl() {
+            self.left(&MoveLeft, window, cx);
+        } else {
+            self.right(&MoveRight, window, cx);
+        }
+    }
+
+    pub(super) fn visual_select_left(
+        &mut self,
+        _: &SelectLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cursor_line_is_rtl() {
+            self.select_right(&SelectRight, window, cx);
+        } else {
+            self.select_left(&SelectLeft, window, cx);
+        }
+    }
+
+    pub(super) fn visual_select_right(
+        &mut self,
+        _: &SelectRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cursor_line_is_rtl() {
+            self.select_left(&SelectLeft, window, cx);
+        } else {
+            self.select_right(&SelectRight, window, cx);
+        }
+    }
+
+    pub(super) fn visual_move_to_previous_word(
+        &mut self,
+        _: &MoveToPreviousWord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cursor_line_is_rtl() {
+            self.move_to_next_word(&MoveToNextWord, window, cx);
+        } else {
+            self.move_to_previous_word(&MoveToPreviousWord, window, cx);
+        }
+    }
+
+    pub(super) fn visual_move_to_next_word(
+        &mut self,
+        _: &MoveToNextWord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cursor_line_is_rtl() {
+            self.move_to_previous_word(&MoveToPreviousWord, window, cx);
+        } else {
+            self.move_to_next_word(&MoveToNextWord, window, cx);
+        }
+    }
+
+    pub(super) fn visual_select_to_previous_word(
+        &mut self,
+        _: &SelectToPreviousWordStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cursor_line_is_rtl() {
+            self.select_to_next_word(&SelectToNextWordEnd, window, cx);
+        } else {
+            self.select_to_previous_word(&SelectToPreviousWordStart, window, cx);
+        }
+    }
+
+    pub(super) fn visual_select_to_next_word(
+        &mut self,
+        _: &SelectToNextWordEnd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cursor_line_is_rtl() {
+            self.select_to_previous_word(&SelectToPreviousWordStart, window, cx);
+        } else {
+            self.select_to_next_word(&SelectToNextWordEnd, window, cx);
+        }
     }
 
     pub(super) fn left(&mut self, _: &MoveLeft, window: &mut Window, cx: &mut Context<Self>) {

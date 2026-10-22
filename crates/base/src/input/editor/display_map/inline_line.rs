@@ -2,6 +2,8 @@
 use gpui::{App, Pixels, Point, ShapedLine, SharedString, TextAlign, Window, point, px};
 use std::ops::Range;
 
+use super::bidi::BidiRow;
+
 pub(crate) struct InlineFragment {
     pub(crate) range: Range<usize>,
     pub(crate) x: Pixels,
@@ -27,6 +29,8 @@ pub(crate) struct InputLine {
     pub(crate) width: Pixels,
     pub(crate) text: SharedString,
     content: Content,
+    /// Caret geometry for a plain row holding right-to-left text.
+    bidi: Option<BidiRow>,
 }
 // Keep the ordinary shaped row inline: boxing it would add an allocation to
 // every existing plain-text row. Only token rows allocate fragment storage.
@@ -41,6 +45,7 @@ impl From<ShapedLine> for InputLine {
             len: line.len,
             width: line.width,
             text: line.text.clone(),
+            bidi: BidiRow::new(&line),
             content: Content::Text(line),
         }
     }
@@ -53,18 +58,22 @@ impl InputLine {
             text,
             width,
             content: Content::Inline(fragments),
+            bidi: None,
         }
     }
     pub(crate) fn x_for_index(&self, ix: usize) -> Pixels {
         match &self.content {
-            Content::Text(line) => line.x_for_index(ix),
+            Content::Text(line) => self
+                .bidi
+                .as_ref()
+                .map_or_else(|| line.x_for_index(ix), |bidi| bidi.x_for_index(ix)),
             Content::Inline(fragments) => {
                 for f in fragments {
                     if ix < f.range.end {
                         return f.x
                             + f.source_text().map_or(
                                 if ix <= f.range.start { px(0.) } else { f.width },
-                                |line| line.x_for_index(ix.saturating_sub(f.range.start)),
+                                |line| shaped_x_for_index(line, ix.saturating_sub(f.range.start)),
                             );
                     }
                 }
@@ -72,9 +81,27 @@ impl InputLine {
             }
         }
     }
+
+    /// The left and right x of the glyphs drawing `range`, which a selection or
+    /// highlight on this row covers.
+    pub(crate) fn x_span(&self, range: Range<usize>) -> (Pixels, Pixels) {
+        if let Some((left, right)) = self
+            .bidi
+            .as_ref()
+            .and_then(|bidi| bidi.x_span(range.clone()))
+        {
+            return (left, right);
+        }
+        let start = self.x_for_index(range.start);
+        let end = self.x_for_index(range.end);
+        (start.min(end), start.max(end))
+    }
     pub(crate) fn closest_index_for_x(&self, x: Pixels) -> usize {
         match &self.content {
-            Content::Text(line) => line.closest_index_for_x(x),
+            Content::Text(line) => self.bidi.as_ref().map_or_else(
+                || line.closest_index_for_x(x),
+                |bidi| bidi.closest_index_for_x(&line.text, x),
+            ),
             Content::Inline(fragments) => {
                 for f in fragments {
                     if x <= f.x + f.width {
@@ -84,7 +111,13 @@ impl InputLine {
                             } else {
                                 f.range.end
                             },
-                            |line| f.range.start + line.closest_index_for_x(x - f.x),
+                            |line| {
+                                f.range.start
+                                    + BidiRow::new(line).map_or_else(
+                                        || line.closest_index_for_x(x - f.x),
+                                        |bidi| bidi.closest_index_for_x(&line.text, x - f.x),
+                                    )
+                            },
                         );
                     }
                 }
@@ -94,7 +127,10 @@ impl InputLine {
     }
     pub(crate) fn index_for_x(&self, x: Pixels) -> Option<usize> {
         match &self.content {
-            Content::Text(line) => line.index_for_x(x),
+            Content::Text(line) => self
+                .bidi
+                .as_ref()
+                .map_or_else(|| line.index_for_x(x), |bidi| bidi.index_for_x(x)),
             Content::Inline(_) => {
                 (x >= px(0.) && x <= self.width).then(|| self.closest_index_for_x(x))
             }
@@ -166,4 +202,9 @@ impl InputLine {
             }
         }
     }
+}
+
+/// `x_for_index` for a token row's fragment, which is shaped on its own.
+fn shaped_x_for_index(line: &ShapedLine, ix: usize) -> Pixels {
+    BidiRow::new(line).map_or_else(|| line.x_for_index(ix), |bidi| bidi.x_for_index(ix))
 }

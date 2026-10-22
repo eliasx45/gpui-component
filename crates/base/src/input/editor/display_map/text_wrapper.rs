@@ -749,6 +749,9 @@ pub(crate) struct LineLayout {
     /// Whether any run of this line carries a background color, so [`Self::paint_background`]
     /// can skip the glyph walk for the common case of a line without highlights.
     has_background: bool,
+    /// The width a right-to-left paragraph's rows are right-aligned in, or `None` for a
+    /// line laid out left to right.
+    rtl_align_width: Option<Pixels>,
 }
 
 impl LineLayout {
@@ -761,6 +764,56 @@ impl LineLayout {
             whitespace_chars: Vec::new(),
             whitespace_indicators: None,
             has_background: false,
+            rtl_align_width: None,
+        }
+    }
+
+    /// Lay this line out as a right-to-left paragraph whose rows each end at the right
+    /// edge of `align_width`, as a browser text field does for such a line.
+    pub(crate) fn right_to_left(mut self, align_width: Option<Pixels>) -> Self {
+        self.rtl_align_width = align_width;
+        self
+    }
+
+    pub(crate) fn is_right_to_left(&self) -> bool {
+        self.rtl_align_width.is_some()
+    }
+
+    /// The x the given visual row starts at, relative to the line layout's left edge.
+    pub(crate) fn row_offset(&self, line_index: usize, last_layout: &LastLayout) -> Pixels {
+        match self.rtl_align_width {
+            Some(align_width) => self.rtl_row_offset(line_index, align_width),
+            None => last_layout.alignment_offset(self.longest_width) + self.line_indent(line_index),
+        }
+    }
+
+    fn rtl_row_offset(&self, line_index: usize, align_width: Pixels) -> Pixels {
+        let width = self
+            .wrapped_lines
+            .get(line_index)
+            .map_or(px(0.), |line| line.width);
+        (align_width - width).max(px(0.))
+    }
+
+    /// A right-to-left row is placed by [`Self::paint_offset`], so gpui must not align it
+    /// again.
+    fn row_alignment(
+        &self,
+        text_align: TextAlign,
+        align_width: Option<Pixels>,
+    ) -> (TextAlign, Option<Pixels>) {
+        if self.is_right_to_left() {
+            (TextAlign::Left, None)
+        } else {
+            (text_align, align_width)
+        }
+    }
+
+    /// The x the given visual row is painted at, given the origin of the line layout.
+    fn paint_offset(&self, line_index: usize) -> Pixels {
+        match self.rtl_align_width {
+            Some(align_width) => self.rtl_row_offset(line_index, align_width),
+            None => self.line_indent(line_index),
         }
     }
 
@@ -862,8 +915,6 @@ impl LineLayout {
         let mut acc_len = 0;
         let mut offset_y = px(0.);
 
-        let x_offset = last_layout.alignment_offset(self.longest_width);
-
         for (i, line) in self.wrapped_lines.iter().enumerate() {
             let is_last = i + 1 == self.wrapped_lines.len();
 
@@ -880,8 +931,7 @@ impl LineLayout {
 
             if matches {
                 let x = line.x_for_index(offset.saturating_sub(acc_len))
-                    + x_offset
-                    + self.line_indent(i);
+                    + self.row_offset(i, last_layout);
                 return Some(point(x, offset_y));
             }
 
@@ -901,13 +951,11 @@ impl LineLayout {
     /// reports the caret affinity that a wrap boundary needs.
     pub(crate) fn closest_index_for_x(&self, x: Pixels, last_layout: &LastLayout) -> usize {
         let mut acc_len = 0;
-        let x_offset = last_layout.alignment_offset(self.longest_width);
-        let x = x - x_offset;
 
         for (i, line) in self.wrapped_lines.iter().enumerate() {
-            let line_indent = self.line_indent(i);
-            if x <= line_indent + line.width {
-                return acc_len + line.closest_index_for_x(x - line_indent);
+            let row_offset = self.row_offset(i, last_layout);
+            if x <= row_offset + line.width {
+                return acc_len + line.closest_index_for_x(x - row_offset);
             }
             acc_len += line.len;
         }
@@ -926,12 +974,11 @@ impl LineLayout {
     ) -> Option<(usize, usize, Pixels)> {
         let mut offset = 0;
         let mut line_top = px(0.);
-        let x_offset = last_layout.alignment_offset(self.longest_width);
 
         for (i, line) in self.wrapped_lines.iter().enumerate() {
             let line_bottom = line_top + last_layout.line_height;
             if pos.y >= line_top && pos.y < line_bottom {
-                return Some((i, offset, pos.x - x_offset - self.line_indent(i)));
+                return Some((i, offset, pos.x - self.row_offset(i, last_layout)));
             }
 
             offset += line.len;
@@ -983,7 +1030,10 @@ impl LineLayout {
             return 0;
         };
 
-        if i + 1 < self.wrapped_lines.len() || last_layout.space_width <= px(0.) {
+        if i + 1 < self.wrapped_lines.len()
+            || last_layout.space_width <= px(0.)
+            || self.is_right_to_left()
+        {
             return 0;
         }
 
@@ -1036,8 +1086,9 @@ impl LineLayout {
         }
 
         for (ix, line) in self.wrapped_lines.iter().enumerate() {
+            let (text_align, align_width) = self.row_alignment(text_align, align_width);
             _ = line.paint_background(
-                pos + point(self.line_indent(ix), ix * line_height),
+                pos + point(self.paint_offset(ix), ix * line_height),
                 line_height,
                 text_align,
                 align_width,
@@ -1057,8 +1108,9 @@ impl LineLayout {
         cx: &mut App,
     ) {
         for (ix, line) in self.wrapped_lines.iter().enumerate() {
+            let (text_align, align_width) = self.row_alignment(text_align, align_width);
             _ = line.paint(
-                pos + point(self.line_indent(ix), ix * line_height),
+                pos + point(self.paint_offset(ix), ix * line_height),
                 line_height,
                 text_align,
                 align_width,
@@ -1077,7 +1129,7 @@ impl LineLayout {
                 };
 
                 let origin = point(
-                    pos.x + *x_position + self.line_indent(*line_index),
+                    pos.x + *x_position + self.paint_offset(*line_index),
                     pos.y + *line_index as f32 * line_height,
                 );
 

@@ -7,8 +7,10 @@
 ///
 /// The goal is to provide a clean, unified API where Editor only needs to know
 /// about `BufferPoint ↔ DisplayPoint` mapping, without worrying about internal wrap/fold complexity.
+mod bidi;
 mod display_map;
 mod inline_line;
+pub(crate) use bidi::is_rtl_paragraph;
 pub(crate) use inline_line::{InlineFragment, InputLine};
 mod fold_map;
 mod folding;

@@ -413,6 +413,9 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) masked: bool,
     pub(super) clean_on_escape: bool,
     pub(super) submit_on_enter: bool,
+    /// Lay out each line whose first strong character is right-to-left as a
+    /// right-to-left paragraph. See [`InputBaseState::auto_text_direction`].
+    pub(super) auto_text_direction: bool,
     pub(super) show_whitespaces: bool,
     /// This flag tells the renderer to prefer the end of the current visual line.
     pub(crate) cursor_line_end_affinity: bool,
@@ -798,6 +801,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             masked: false,
             clean_on_escape: false,
             submit_on_enter: false,
+            auto_text_direction: false,
             show_whitespaces: false,
             loading: false,
             pattern: None,
@@ -1240,6 +1244,17 @@ impl<M: InputModeKind> InputBaseState<M> {
     pub fn set_submit_on_enter(&mut self, submit: bool, cx: &mut Context<Self>) {
         self.submit_on_enter = submit;
         cx.notify();
+    }
+
+    /// Set true to give each line the direction of its first strong character, as a
+    /// web `<textarea dir="auto">` does per paragraph: a line starting in Arabic,
+    /// Hebrew or Persian is right-aligned, and the horizontal arrow keys follow its
+    /// reading direction. Other lines stay left to right.
+    ///
+    /// Default is `false`.
+    pub fn auto_text_direction(mut self, auto: bool) -> Self {
+        self.auto_text_direction = auto;
+        self
     }
 
     /// Set whether to show whitespace characters.
@@ -4673,10 +4688,10 @@ impl<M: InputModeKind> Render for InputBaseState<M> {
                             .on_action(window.listener_for(&entity, InputBaseState::outdent_block))
                     })
             })
-            .on_action(window.listener_for(&entity, InputBaseState::left))
-            .on_action(window.listener_for(&entity, InputBaseState::right))
-            .on_action(window.listener_for(&entity, InputBaseState::select_left))
-            .on_action(window.listener_for(&entity, InputBaseState::select_right))
+            .on_action(window.listener_for(&entity, InputBaseState::visual_left))
+            .on_action(window.listener_for(&entity, InputBaseState::visual_right))
+            .on_action(window.listener_for(&entity, InputBaseState::visual_select_left))
+            .on_action(window.listener_for(&entity, InputBaseState::visual_select_right))
             .when(self.is_multi_line(), |this| {
                 this.on_action(window.listener_for(&entity, InputBaseState::up))
                     .on_action(window.listener_for(&entity, InputBaseState::down))
@@ -4690,14 +4705,14 @@ impl<M: InputModeKind> Render for InputBaseState<M> {
             .on_action(window.listener_for(&entity, InputBaseState::on_action_select_all))
             .on_action(window.listener_for(&entity, InputBaseState::select_to_start_of_line))
             .on_action(window.listener_for(&entity, InputBaseState::select_to_end_of_line))
-            .on_action(window.listener_for(&entity, InputBaseState::select_to_previous_word))
-            .on_action(window.listener_for(&entity, InputBaseState::select_to_next_word))
+            .on_action(window.listener_for(&entity, InputBaseState::visual_select_to_previous_word))
+            .on_action(window.listener_for(&entity, InputBaseState::visual_select_to_next_word))
             .on_action(window.listener_for(&entity, InputBaseState::home))
             .on_action(window.listener_for(&entity, InputBaseState::end))
             .on_action(window.listener_for(&entity, InputBaseState::move_to_start))
             .on_action(window.listener_for(&entity, InputBaseState::move_to_end))
-            .on_action(window.listener_for(&entity, InputBaseState::move_to_previous_word))
-            .on_action(window.listener_for(&entity, InputBaseState::move_to_next_word))
+            .on_action(window.listener_for(&entity, InputBaseState::visual_move_to_previous_word))
+            .on_action(window.listener_for(&entity, InputBaseState::visual_move_to_next_word))
             .on_action(window.listener_for(&entity, InputBaseState::select_to_start))
             .on_action(window.listener_for(&entity, InputBaseState::select_to_end))
             .on_action(window.listener_for(&entity, InputBaseState::show_character_palette))
