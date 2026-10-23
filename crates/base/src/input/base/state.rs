@@ -740,15 +740,26 @@ impl<M: InputModeKind> InputBaseState<M> {
             }),
             // Observe the blink cursor to repaint the view when it changes.
             cx.observe(&blink_cursor, |_, _, cx| cx.notify()),
-            // Blink the cursor when the window is active, pause when it's not.
+            // Blink the cursor when the window is active, stop it when it's not.
+            //
+            // CDXC:DesignSystem 2026-10-23 WHY: An inactive window draws no
+            // caret (`show_cursor`), yet a caret left blinking there repainted
+            // the window twice a second for as long as the app sat in the
+            // background or minimized. Deactivation stops it, activation
+            // starts it again from a visible caret, and `render` does not
+            // restart it in an inactive window.
             cx.observe_window_activation(window, |input, window, cx| {
+                if !input.focus_handle.is_focused(window) {
+                    return;
+                }
                 if window.is_window_active() {
-                    let focus_handle = input.focus_handle.clone();
-                    if focus_handle.is_focused(window) {
-                        input.blink_cursor.update(cx, |blink_cursor, cx| {
-                            blink_cursor.start(cx);
-                        });
-                    }
+                    input.blink_cursor.update(cx, |blink_cursor, cx| {
+                        blink_cursor.start(cx);
+                    });
+                } else {
+                    input.blink_cursor.update(cx, |blink_cursor, cx| {
+                        blink_cursor.stop(cx);
+                    });
                 }
             }),
             cx.on_focus(&focus_handle, window, Self::on_focus),
@@ -4640,7 +4651,12 @@ impl<M: InputModeKind> Render for InputBaseState<M> {
         // field that got focus any other way (drawn in another window, or
         // shown again with focus still on it after a blur) showed no caret.
         // Every focus change redraws the window, so this runs on each one.
-        if self.focus_handle.is_focused(window) && !self.blink_cursor.read(cx).is_running() {
+        // Every activation change does too, and the caret of an inactive
+        // window stays stopped (see the activation observer).
+        if self.focus_handle.is_focused(window)
+            && window.is_window_active()
+            && !self.blink_cursor.read(cx).is_running()
+        {
             self.blink_cursor.update(cx, |cursor, cx| cursor.start(cx));
         }
         let entity = cx.entity();
