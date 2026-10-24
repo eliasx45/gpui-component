@@ -4,9 +4,10 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, AnyView, App, ClickEvent, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, Pixels, SharedString, Size, StatefulInteractiveElement as _,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px, svg,
+    Anchor, AnyElement, AnyView, App, ClickEvent, Entity, FontWeight, Hsla,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, SharedString,
+    Size, StatefulInteractiveElement as _, Styled as _, Window, anchored, deferred, div, point,
+    prelude::FluentBuilder as _, px, svg,
 };
 
 use super::{
@@ -41,6 +42,53 @@ pub struct InlineLink {
     pub font_weight: Option<FontWeight>,
     /// Ghostex fork: the label is struck through.
     pub strikethrough: bool,
+    /// Ghostex fork: the label's typeface, when it differs from the line's
+    /// (a chip drawn as inline code).
+    pub font_family: Option<SharedString>,
+    /// Ghostex fork: the label's size relative to the line's.
+    pub font_scale: Option<f32>,
+    /// Ghostex fork: buttons shown in a small bar above the chip while the
+    /// pointer is on the chip or the bar; the bar never covers the label.
+    pub hover_actions: Vec<InlineLinkAction>,
+    /// Ghostex fork: how that bar looks.
+    pub hover_bar: Option<InlineLinkBar>,
+}
+
+/// Ghostex fork: one button of a chip's hover bar. Its press goes to the link
+/// click handler with `url`, as a press on a link with that address would.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InlineLinkAction {
+    pub url: SharedString,
+    /// What the button does, read by assistive technology and shown as its
+    /// tooltip.
+    pub label: SharedString,
+    pub icon: SharedString,
+}
+
+/// Ghostex fork: the bar a chip's hover buttons sit in.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InlineLinkBar {
+    pub background: Hsla,
+    pub border_color: Hsla,
+    pub border_width: Pixels,
+    pub radius: Pixels,
+    pub padding: Pixels,
+    pub gap: Pixels,
+    /// The room between the bar and the chip below it.
+    pub spacing: Pixels,
+    pub button_size: Pixels,
+    pub button_radius: Pixels,
+    pub button_hover_background: Hsla,
+    pub icon_size: Pixels,
+    pub icon_color: Hsla,
+}
+
+/// Ghostex fork: whether the pointer is on a chip or on its hover bar, kept
+/// across frames so the bar stays while the pointer crosses into it.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct InlineLinkHover {
+    chip: bool,
+    bar: bool,
 }
 
 /// Ghostex fork: the outlined box a chip can sit in (a chat's question tags):
@@ -53,6 +101,8 @@ pub struct InlineLinkFrame {
     pub border_color: Hsla,
     pub radius: Pixels,
     pub hover_background: Option<Hsla>,
+    /// Ghostex fork: the fill under the chip when the pointer is elsewhere.
+    pub background: Option<Hsla>,
 }
 
 impl InlineLink {
@@ -164,9 +214,8 @@ pub(super) fn split_references(
                 state: state.clone(),
                 text: presentation.label.clone(),
                 links: vec![(0..len, link)],
-                highlights: vec![(
-                    0..len,
-                    InlineHighlight::from(gpui::HighlightStyle {
+                highlights: vec![(0..len, {
+                    let mut highlight = InlineHighlight::from(gpui::HighlightStyle {
                         color: Some(presentation.color),
                         font_weight: presentation.font_weight,
                         strikethrough: presentation.strikethrough.then(|| {
@@ -176,8 +225,11 @@ pub(super) fn split_references(
                             }
                         }),
                         ..Default::default()
-                    }),
-                )],
+                    });
+                    highlight.font_family = presentation.font_family.clone();
+                    highlight.font_size_scale = presentation.font_scale;
+                    highlight
+                })],
                 backgrounds: Vec::new(),
                 reveal: reveal
                     .as_ref()
@@ -212,6 +264,8 @@ pub(super) fn element(
     secondary: Option<Arc<LinkSecondaryClickFn>>,
     tooltip: Option<Arc<LinkTooltipFn>>,
     default_cursor: bool,
+    hover: Option<Entity<InlineLinkHover>>,
+    cx: &App,
 ) -> AnyElement {
     let url = link.url.clone();
     let aux_url = link.url.clone();
@@ -220,6 +274,18 @@ pub(super) fn element(
     let has_secondary = secondary.is_some();
     let title = reference.title.clone();
     let label_width = (size.width - reference.extra_width()).max(px(0.));
+    let bar = hover.as_ref().and_then(|hover| {
+        let state = *hover.read(cx);
+        hover_bar(
+            reference,
+            id,
+            hover,
+            state,
+            handler.clone(),
+            tooltip.clone(),
+        )
+    });
+    let chip_hover = hover.clone();
     div()
         .id(("inline-link", id))
         .role(gpui::Role::Link)
@@ -236,13 +302,14 @@ pub(super) fn element(
                 .border(frame.border_width)
                 .border_color(frame.border_color)
                 .rounded(frame.radius)
+                .when_some(frame.background, |this, fill| this.bg(fill))
                 .when_some(frame.hover_background, |this, fill| {
                     this.hover(move |style| style.bg(fill))
                 })
         })
         .when(!default_cursor, |this| this.cursor_pointer())
         .whitespace_nowrap()
-        .when_some(tooltip, |this, tooltip| {
+        .when_some(tooltip.filter(|_| !title.is_empty()), |this, tooltip| {
             this.tooltip(move |window, cx| tooltip(title.clone(), window, cx))
         })
         .when(!reference.icon.is_empty(), |this| {
@@ -261,6 +328,19 @@ pub(super) fn element(
                 .overflow_hidden()
                 .child(inline),
         )
+        .when_some(chip_hover, |this, hover| {
+            this.on_hover(move |hovered, window, cx| {
+                let hovered = *hovered;
+                hover.update(cx, |state, _| state.chip = hovered);
+                window.refresh();
+            })
+        })
+        // Above the chip, out of its clip: an absolute anchor at its top left,
+        // the bar drawn after everything else from there.
+        .when_some(bar, |this, bar| {
+            this.relative()
+                .child(div().absolute().top_0().left_0().child(deferred(bar)))
+        })
         .on_click(move |event, window, cx| {
             if matches!(event, ClickEvent::Mouse(_))
                 && crate::TextSelection::has_selection(window, cx)
@@ -290,4 +370,93 @@ pub(super) fn element(
             })
         })
         .into_any_element()
+}
+
+/// Ghostex fork: the bar of a chip's hover buttons, anchored above the chip
+/// (below it when there is no room above), shown while the pointer is on the
+/// chip or the bar. Its bottom edge reaches into the chip's top edge, so the
+/// pointer crossing from the chip into the bar never leaves both.
+fn hover_bar(
+    reference: &InlineLink,
+    id: usize,
+    hover: &Entity<InlineLinkHover>,
+    state: InlineLinkHover,
+    handler: Option<Arc<LinkClickHandlerFn>>,
+    tooltip: Option<Arc<LinkTooltipFn>>,
+) -> Option<AnyElement> {
+    let look = reference.hover_bar.clone()?;
+    if reference.hover_actions.is_empty() || !(state.chip || state.bar) {
+        return None;
+    }
+    let bar_hover = hover.clone();
+    let overlap = px(2.);
+    Some(
+        anchored()
+            .anchor(Anchor::BottomLeft)
+            .offset(point(Pixels::ZERO, overlap))
+            .child(
+                div()
+                    .id(("inline-link-bar", id))
+                    .pb(look.spacing + overlap)
+                    .on_hover(move |hovered, window, cx| {
+                        let hovered = *hovered;
+                        bar_hover.update(cx, |state, _| state.bar = hovered);
+                        window.refresh();
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(look.gap)
+                            .p(look.padding)
+                            .rounded(look.radius)
+                            .border(look.border_width)
+                            .border_color(look.border_color)
+                            .bg(look.background)
+                            .shadow_md()
+                            .children(reference.hover_actions.iter().enumerate().map(
+                                |(index, action)| {
+                                    let url = action.url.clone();
+                                    let label = action.label.clone();
+                                    let handler = handler.clone();
+                                    div()
+                                        .id(("inline-link-bar-action", index))
+                                        .role(gpui::Role::Button)
+                                        .aria_label(action.label.clone())
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size(look.button_size)
+                                        .rounded(look.button_radius)
+                                        .cursor_pointer()
+                                        .hover(move |style| style.bg(look.button_hover_background))
+                                        .when_some(tooltip.clone(), |this, tooltip| {
+                                            this.tooltip(move |window, cx| {
+                                                tooltip(label.clone(), window, cx)
+                                            })
+                                        })
+                                        .child(
+                                            svg()
+                                                .path(action.icon.clone())
+                                                .size(look.icon_size)
+                                                .text_color(look.icon_color)
+                                                .flex_shrink_0(),
+                                        )
+                                        .on_click(move |event, window, cx| {
+                                            crate::TextSelection::end(window, cx);
+                                            cx.stop_propagation();
+                                            handle_link_click(
+                                                &handler,
+                                                url.clone(),
+                                                event.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        })
+                                },
+                            )),
+                    ),
+            )
+            .into_any_element(),
+    )
 }

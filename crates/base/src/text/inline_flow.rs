@@ -758,6 +758,21 @@ impl Element for InlineFlow {
                         point(bounds.left(), bounds.top() + selection_bounds.top()),
                         size(bounds.size.width, selection_bounds.size.height),
                     ));
+                    // Ghostex fork: a chip with hover buttons keeps whether the
+                    // pointer is on it or its bar, keyed by its place in this
+                    // paragraph.
+                    let hover = reference
+                        .as_ref()
+                        .filter(|reference| !reference.link.hover_actions.is_empty())
+                        .map(|_| {
+                            window.use_keyed_state(
+                                gpui::ElementId::Name(
+                                    format!("inline-link-hover:{flow_id}:{source_offset}").into(),
+                                ),
+                                cx,
+                                |_, _| super::inline_link::InlineLinkHover::default(),
+                            )
+                        });
                     let (mut element, element_origin, element_size) =
                         match (reference, links.first()) {
                             (Some(reference), Some((_, link))) => (
@@ -771,6 +786,8 @@ impl Element for InlineFlow {
                                     self.link_secondary_click.clone(),
                                     link_tooltip.clone(),
                                     self.default_cursor,
+                                    hover,
+                                    cx,
                                 ),
                                 bounds.origin + origin,
                                 fragment_size,

@@ -23,7 +23,7 @@ mod utils;
 use gpui::{App, ElementId, IntoElement, RenderOnce, SharedString, Window};
 pub(crate) use inline::InlineState;
 pub use inline_element::*;
-pub use inline_link::{InlineLink, InlineLinkFrame};
+pub use inline_link::{InlineLink, InlineLinkAction, InlineLinkBar, InlineLinkFrame};
 pub use markdown_ext::*;
 pub use node::{CodeBlock, TableData};
 pub use range_highlight::{RangeHighlight, RangeHighlightError, RenderedText};
