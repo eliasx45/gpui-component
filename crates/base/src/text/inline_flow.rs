@@ -773,6 +773,22 @@ impl Element for InlineFlow {
                                 |_, _| super::inline_link::InlineLinkHover::default(),
                             )
                         });
+                    // Ghostex fork: the hover bar goes above the chip unless the
+                    // clip this paragraph is drawn in (the transcript's visible
+                    // area) has no room for it there and has room below.
+                    let bar_below = reference
+                        .as_ref()
+                        .and_then(|reference| reference.link.hover_bar.as_ref())
+                        .is_some_and(|bar| {
+                            let room = bar.button_size
+                                + (bar.padding + bar.border_width) * 2.
+                                + bar.spacing
+                                + px(2.);
+                            let visible = window.content_mask().bounds;
+                            let top = bounds.origin.y + origin.y;
+                            top - room < visible.top()
+                                && top + fragment_size.height + room <= visible.bottom()
+                        });
                     let (mut element, element_origin, element_size) =
                         match (reference, links.first()) {
                             (Some(reference), Some((_, link))) => (
@@ -787,6 +803,7 @@ impl Element for InlineFlow {
                                     link_tooltip.clone(),
                                     self.default_cursor,
                                     hover,
+                                    bar_below,
                                     cx,
                                 ),
                                 bounds.origin + origin,

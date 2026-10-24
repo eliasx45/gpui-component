@@ -265,6 +265,7 @@ pub(super) fn element(
     tooltip: Option<Arc<LinkTooltipFn>>,
     default_cursor: bool,
     hover: Option<Entity<InlineLinkHover>>,
+    bar_below: bool,
     cx: &App,
 ) -> AnyElement {
     let url = link.url.clone();
@@ -281,6 +282,7 @@ pub(super) fn element(
             id,
             hover,
             state,
+            bar_below,
             handler.clone(),
             tooltip.clone(),
         )
@@ -335,11 +337,23 @@ pub(super) fn element(
                 window.refresh();
             })
         })
-        // Above the chip, out of its clip: an absolute anchor at its top left,
-        // the bar drawn after everything else from there.
+        // Above the chip (below it when `bar_below`), out of its clip: an
+        // absolute anchor at its top or bottom left, the bar drawn after
+        // everything else from there.
         .when_some(bar, |this, bar| {
-            this.relative()
-                .child(div().absolute().top_0().left_0().child(deferred(bar)))
+            this.relative().child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .map(|anchor| {
+                        if bar_below {
+                            anchor.bottom_0()
+                        } else {
+                            anchor.top_0()
+                        }
+                    })
+                    .child(deferred(bar)),
+            )
         })
         .on_click(move |event, window, cx| {
             if matches!(event, ClickEvent::Mouse(_))
@@ -373,14 +387,17 @@ pub(super) fn element(
 }
 
 /// Ghostex fork: the bar of a chip's hover buttons, anchored above the chip
-/// (below it when there is no room above), shown while the pointer is on the
-/// chip or the bar. Its bottom edge reaches into the chip's top edge, so the
-/// pointer crossing from the chip into the bar never leaves both.
+/// (below it when `below`, which the flow decides from the room its clip
+/// leaves), shown while the pointer is on the chip or the bar. Its edge
+/// facing the chip reaches into the chip's own, so the pointer crossing from
+/// the chip into the bar never leaves both.
+#[allow(clippy::too_many_arguments)]
 fn hover_bar(
     reference: &InlineLink,
     id: usize,
     hover: &Entity<InlineLinkHover>,
     state: InlineLinkHover,
+    below: bool,
     handler: Option<Arc<LinkClickHandlerFn>>,
     tooltip: Option<Arc<LinkTooltipFn>>,
 ) -> Option<AnyElement> {
@@ -392,12 +409,22 @@ fn hover_bar(
     let overlap = px(2.);
     Some(
         anchored()
-            .anchor(Anchor::BottomLeft)
-            .offset(point(Pixels::ZERO, overlap))
+            .anchor(if below {
+                Anchor::TopLeft
+            } else {
+                Anchor::BottomLeft
+            })
+            .offset(point(Pixels::ZERO, if below { -overlap } else { overlap }))
             .child(
                 div()
                     .id(("inline-link-bar", id))
-                    .pb(look.spacing + overlap)
+                    .map(|bridge| {
+                        if below {
+                            bridge.pt(look.spacing + overlap)
+                        } else {
+                            bridge.pb(look.spacing + overlap)
+                        }
+                    })
                     .on_hover(move |hovered, window, cx| {
                         let hovered = *hovered;
                         bar_hover.update(cx, |state, _| state.bar = hovered);
