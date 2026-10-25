@@ -37,6 +37,8 @@ mod inline_replacement;
 #[path = "base/inline_tokens.rs"]
 mod inline_tokens;
 mod input;
+#[path = "base/system_text_replacement.rs"]
+mod system_text_replacement;
 #[path = "base/token_presentation.rs"]
 mod token_presentation;
 pub use inline_replacement::InlineReplacement;

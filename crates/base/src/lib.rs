@@ -72,6 +72,7 @@ mod table;
 mod tabs;
 pub mod text;
 mod text_boundary;
+pub mod text_replacement;
 mod text_selection;
 mod theme;
 pub mod theme_tokens;

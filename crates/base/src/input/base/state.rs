@@ -4194,6 +4194,8 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         // Committing a composition ends the transaction it opened, whether or
         // not the platform follows up with `unmark_text`.
         let ends_composition = self.ime_marked_range.is_some();
+        // Checked before the edit, which ends any IME composition.
+        let expand_text_replacement = self.may_expand_text_replacement(new_text);
 
         self.pause_blink_cursor(cx);
 
@@ -4297,6 +4299,9 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
 
             if !self.silent_replace_text {
                 M::on_text_typed(self, &range, new_text, window, cx);
+            }
+            if expand_text_replacement {
+                self.expand_text_replacement(new_text, window, cx);
             }
             return;
         }
@@ -4413,6 +4418,9 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         }
         if self.emit_events {
             cx.emit(InputEvent::Change);
+        }
+        if expand_text_replacement {
+            self.expand_text_replacement(new_text, window, cx);
         }
         cx.notify();
     }
