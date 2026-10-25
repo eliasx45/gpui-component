@@ -103,12 +103,15 @@ impl From<Option<Placement>> for ManagedTooltipPlacement {
 }
 
 /// Where a tooltip of `tooltip_size` goes for `placement`, kept `margin` inside the viewport.
+/// `clamp_x` false keeps an explicit placement's horizontal position (Ghostex: a presented
+/// tooltip, which its host keeps inside the app window, may reach past this window's edges).
 fn tooltip_bounds(
     trigger_bounds: Bounds<Pixels>,
     tooltip_size: Size<Pixels>,
     viewport_size: Size<Pixels>,
     margin: Edges<Pixels>,
     placement: ManagedTooltipPlacement,
+    clamp_x: bool,
 ) -> Bounds<Pixels> {
     let preferred = match placement {
         ManagedTooltipPlacement::Auto => Some(None),
@@ -164,7 +167,13 @@ fn tooltip_bounds(
         }
     };
 
-    clamp(Bounds::new(origin, tooltip_size), viewport_size, margin)
+    let bounds = Bounds::new(origin, tooltip_size);
+    let clamped = clamp(bounds, viewport_size, margin);
+    if clamp_x {
+        clamped
+    } else {
+        Bounds::new(point(bounds.origin.x, clamped.origin.y), tooltip_size)
+    }
 }
 
 /// Application-wide timing for tooltips shown through [`TooltipOverlay`].
@@ -852,19 +861,28 @@ impl Element for TooltipOverlayPositioner {
             window.window_decorations(),
             window.client_inset().unwrap_or(px(0.)),
         );
+        // CDXC:Tooltips 2026-10-25 WHY: a presented tooltip draws in its own window (Ghostex's frosted tooltip host), which keeps it inside the app's main window; clamping it to this window too pinned a card wider than a narrow child window (the floating Files list) to that window's left edge, so it ran past the main window's right edge instead of opening leftwards under its trigger.
         let tooltip_bounds = tooltip_bounds(
             self.trigger_bounds,
             tooltip_size,
             window.viewport_size(),
             frame.map(|inset| *inset + WINDOW_MARGIN),
             self.placement,
+            !window.tooltip_presenter_active(),
         );
         // CDXC:Tooltips 2026-09-24 SEE-ALSO: gpui's `Window::occlude_native_region` and its stock tooltip prepaint (`window.rs`), which dodge the same regions the same way; the desktop's CEF element records them.
-        let tooltip_bounds = nudge_out_of_native_occlusions(
-            tooltip_bounds,
-            window.native_occlusions(),
-            Bounds::new(Point::default(), window.viewport_size()),
-        );
+        // CDXC:Tooltips 2026-10-25 WHY: a presented tooltip draws in a window of its own above
+        // native views (Ghostex's frosted tooltip host), so it keeps its placement instead of being
+        // pushed out of their frames (gpui's stock tooltip prepaint does the same).
+        let tooltip_bounds = if window.tooltip_presenter_active() {
+            tooltip_bounds
+        } else {
+            nudge_out_of_native_occlusions(
+                tooltip_bounds,
+                window.native_occlusions(),
+                Bounds::new(Point::default(), window.viewport_size()),
+            )
+        };
 
         // Ghostex: a window with a tooltip presenter draws its tooltips in a window of their own
         // (the desktop's frosted tooltip host), so this one only reports where it would go.
