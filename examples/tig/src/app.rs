@@ -83,10 +83,10 @@ pub(super) fn init(cx: &mut App) {
         KeyBinding::new("escape", FocusHistory, Some("Tig")),
         KeyBinding::new("n", NextChange, Some("Tig")),
         KeyBinding::new("shift-n", PreviousChange, Some("Tig")),
-        KeyBinding::new("secondary-b", ToggleSidebar, Some("Tig")),
-        KeyBinding::new("secondary-r", Refresh, Some("Tig")),
-        KeyBinding::new("secondary-shift-c", CopyHash, Some("Tig")),
-        KeyBinding::new("secondary-q", Quit, Some("Tig")),
+        gpui_kit::base::bind_secondary("secondary-b", ToggleSidebar, Some("Tig"), cx),
+        gpui_kit::base::bind_secondary("secondary-r", Refresh, Some("Tig"), cx),
+        gpui_kit::base::bind_secondary("secondary-shift-c", CopyHash, Some("Tig"), cx),
+        gpui_kit::base::bind_secondary("secondary-q", Quit, Some("Tig"), cx),
     ]);
 }
 

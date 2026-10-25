@@ -14,6 +14,7 @@ mod accordion;
 pub mod actions;
 mod alert_dialog;
 pub mod animation;
+mod key_binding;
 #[doc(hidden)]
 pub mod async_util;
 mod auto_scroll;
@@ -94,6 +95,7 @@ pub use alert_dialog::{
     AlertDialogDescription, AlertDialogPopup, AlertDialogTitle, AlertDialogTrigger,
 };
 pub use auto_scroll::AutoScroll;
+pub use key_binding::bind_secondary;
 pub use avatar::{Avatar, AvatarFallback, AvatarImage};
 pub use button::{Button, ButtonStyles};
 pub use calendar::{

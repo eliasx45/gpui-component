@@ -509,7 +509,9 @@ impl SpeechApp {
             ),
         };
         let capturing = status.is_capturing();
-        let toggle_keys = Keystroke::parse(TOGGLE_KEYS).ok().map(Kbd::new);
+        let toggle_keys = Keystroke::parse_with_os(TOGGLE_KEYS, cx.platform_info().os)
+            .ok()
+            .map(Kbd::new);
 
         h_flex()
             .gap_3()
@@ -837,7 +839,8 @@ fn main() {
             return;
         }
 
-        cx.bind_keys([KeyBinding::new(TOGGLE_KEYS, ToggleSpeech, None)]);
+        let toggle = gpui_kit::base::bind_secondary(TOGGLE_KEYS, ToggleSpeech, None, cx);
+        cx.bind_keys([toggle]);
         cx.activate(true);
 
         let window_options = WindowOptions {

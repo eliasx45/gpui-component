@@ -8,7 +8,7 @@ use gpui::{
     Action, App, AppContext, Bounds, ClipboardItem, Context, Edges, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point,
-    Render, ScrollHandle, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
+    Render, ScrollHandle, ScrollEvent, SharedString, StatefulInteractiveElement as _,
     Styled as _, Subscription, UTF16Selection, WeakFocusHandle, Window, actions, div, point,
     prelude::FluentBuilder as _, px,
 };
@@ -154,7 +154,7 @@ pub struct MacTextKeys(pub bool);
 
 impl gpui::Global for MacTextKeys {}
 
-fn key<A: gpui::Action>(keystrokes: &str, action: A) -> KeyBinding {
+fn key<A: gpui::Action>(keystrokes: &'static str, action: A) -> KeyBinding {
     KeyBinding::new(keystrokes, action, Some(CONTEXT))
 }
 
@@ -2915,9 +2915,9 @@ impl<M: InputModeKind> InputBaseState<M> {
         }
     }
 
-    pub(super) fn on_scroll_wheel(
+    pub(super) fn on_scroll(
         &mut self,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -5287,7 +5287,7 @@ impl<M: InputModeKind> Render for InputBaseState<M> {
                 window.listener_for(&entity, InputBaseState::on_mouse_up),
             )
             .on_mouse_move(window.listener_for(&entity, InputBaseState::on_mouse_move))
-            .on_scroll_wheel(window.listener_for(&entity, InputBaseState::on_scroll_wheel))
+            .on_scroll(window.listener_for(&entity, InputBaseState::on_scroll))
             .when(self.is_multi_line() && !self.disabled, |this| {
                 this.on_modifiers_changed(cx.listener(|_, _, _, cx| cx.notify()))
             })
@@ -6370,8 +6370,8 @@ mod tests {
     ) {
         cx.update(|window, cx| {
             view.input.update(cx, |state, cx| {
-                state.on_scroll_wheel(
-                    &ScrollWheelEvent {
+                state.on_scroll(
+                    &ScrollEvent {
                         delta: gpui::ScrollDelta::Pixels(point(px(0.), px(dy))),
                         touch_phase: phase,
                         ..Default::default()
@@ -6516,8 +6516,8 @@ mod tests {
         assert!(stretch < 0.);
         cx.update(|window, cx| {
             view.input.update(cx, |state, cx| {
-                state.on_scroll_wheel(
-                    &ScrollWheelEvent {
+                state.on_scroll(
+                    &ScrollEvent {
                         delta: gpui::ScrollDelta::Pixels(point(px(1.), px(0.))),
                         touch_phase: gpui::TouchPhase::Ended,
                         ..Default::default()
@@ -6548,8 +6548,8 @@ mod tests {
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);
             view.input.update(cx, |state, cx| {
-                state.on_scroll_wheel(
-                    &ScrollWheelEvent {
+                state.on_scroll(
+                    &ScrollEvent {
                         delta: gpui::ScrollDelta::Lines(point(0., -100_000.)),
                         touch_phase: gpui::TouchPhase::Moved,
                         ..Default::default()
@@ -6577,8 +6577,8 @@ mod tests {
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);
             view.input.update(cx, |state, cx| {
-                state.on_scroll_wheel(
-                    &ScrollWheelEvent {
+                state.on_scroll(
+                    &ScrollEvent {
                         delta: gpui::ScrollDelta::Lines(point(0., 2.)),
                         touch_phase: gpui::TouchPhase::Moved,
                         ..Default::default()
@@ -6663,8 +6663,8 @@ mod tests {
         window
             .update(cx, |_, window, cx| {
                 input.update(cx, |state, cx| {
-                    state.on_scroll_wheel(
-                        &ScrollWheelEvent {
+                    state.on_scroll(
+                        &ScrollEvent {
                             delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-40.))),
                             ..Default::default()
                         },
@@ -6684,8 +6684,8 @@ mod tests {
         window
             .update(cx, |_, window, cx| {
                 input.update(cx, |state, cx| {
-                    state.on_scroll_wheel(
-                        &ScrollWheelEvent {
+                    state.on_scroll(
+                        &ScrollEvent {
                             delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-40.))),
                             ..Default::default()
                         },

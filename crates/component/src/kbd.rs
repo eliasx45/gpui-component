@@ -238,7 +238,7 @@ impl RenderOnce for Kbd {
         div()
             // Lets a test ask whether a given shortcut hint was painted this
             // frame; a no-op outside test-support builds.
-            .debug_selector(|| format!("kbd:{}", self.stroke.unparse()))
+            .debug_selector(|| format!("kbd:{}", self.stroke.unparse(cx.platform_info().os)))
             .text_color(cx.theme().muted_foreground)
             .bg(cx.theme().tokens.muted)
             .when(self.outline, |this| {
@@ -274,7 +274,9 @@ mod tests {
             assert_eq!(Kbd::format(&Keystroke::parse("cmd-+").unwrap()), "⌘+");
             assert_eq!(Kbd::format(&Keystroke::parse("cmd-enter").unwrap()), "⌘⏎");
             assert_eq!(
-                Kbd::format(&Keystroke::parse("secondary-f12").unwrap()),
+                Kbd::format(
+                    &Keystroke::parse_with_os("secondary-f12", gpui::OperatingSystem::Mac).unwrap()
+                ),
                 "⌘F12"
             );
             assert_eq!(

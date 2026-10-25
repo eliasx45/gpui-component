@@ -4,7 +4,7 @@ use gpui::{
     AnyElement, AnyView, App, Bounds, Context, DispatchPhase, Display, Div, Edges, Element,
     ElementId, Entity, Global, GlobalElementId, Half as _, InspectorElementId, InteractiveElement,
     IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Position,
-    Render, RenderOnce, Role, ScrollWheelEvent, Size, Stateful, StatefulInteractiveElement, Style,
+    Render, RenderOnce, Role, ScrollEvent, Size, Stateful, StatefulInteractiveElement, Style,
     Styled, Task, Window, canvas, deferred, div, native_occlusion_row_gap,
     nudge_out_of_native_occlusions, point, prelude::FluentBuilder as _, px,
 };
@@ -670,7 +670,7 @@ impl Render for TooltipOverlay {
                 });
                 // A scroll moves the content out from under the tooltip it belongs to.
                 let on_scroll = overlay.clone();
-                window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, cx| {
+                window.on_mouse_event(move |_: &ScrollEvent, phase, _, cx| {
                     if phase == DispatchPhase::Capture {
                         let _ = on_scroll.update(cx, |overlay, cx| overlay.hide(cx));
                     }

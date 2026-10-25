@@ -279,19 +279,15 @@ impl CommandStory {
             "ctrl"
         };
         cx.bind_keys([
-            KeyBinding::new(&format!("{primary}-p"), OpenProfile, Some(COMMAND_CONTEXT)),
-            KeyBinding::new(&format!("{primary}-b"), OpenBilling, Some(COMMAND_CONTEXT)),
-            KeyBinding::new(&format!("{primary}-s"), OpenSettings, Some(COMMAND_CONTEXT)),
-            KeyBinding::new(&format!("{primary}-h"), GoHome, Some(COMMAND_CONTEXT)),
-            KeyBinding::new(&format!("{primary}-i"), OpenInbox, Some(COMMAND_CONTEXT)),
-            KeyBinding::new(
-                &format!("{primary}-d"),
-                OpenDocuments,
-                Some(COMMAND_CONTEXT),
-            ),
-            KeyBinding::new(&format!("{primary}-f"), OpenFolders, Some(COMMAND_CONTEXT)),
-            KeyBinding::new(&format!("{primary}-n"), NewFile, Some(COMMAND_CONTEXT)),
-            KeyBinding::new(&format!("{primary}-c"), CopyItem, Some(COMMAND_CONTEXT)),
+            gpui_kit::base::bind_secondary(&format!("{primary}-p"), OpenProfile, Some(COMMAND_CONTEXT), cx),
+            gpui_kit::base::bind_secondary(&format!("{primary}-b"), OpenBilling, Some(COMMAND_CONTEXT), cx),
+            gpui_kit::base::bind_secondary(&format!("{primary}-s"), OpenSettings, Some(COMMAND_CONTEXT), cx),
+            gpui_kit::base::bind_secondary(&format!("{primary}-h"), GoHome, Some(COMMAND_CONTEXT), cx),
+            gpui_kit::base::bind_secondary(&format!("{primary}-i"), OpenInbox, Some(COMMAND_CONTEXT), cx),
+            gpui_kit::base::bind_secondary(&format!("{primary}-d"), OpenDocuments, Some(COMMAND_CONTEXT), cx),
+            gpui_kit::base::bind_secondary(&format!("{primary}-f"), OpenFolders, Some(COMMAND_CONTEXT), cx),
+            gpui_kit::base::bind_secondary(&format!("{primary}-n"), NewFile, Some(COMMAND_CONTEXT), cx),
+            gpui_kit::base::bind_secondary(&format!("{primary}-c"), CopyItem, Some(COMMAND_CONTEXT), cx),
             KeyBinding::new("backspace", DeleteItem, Some(COMMAND_CONTEXT)),
         ]);
 
