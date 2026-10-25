@@ -1,17 +1,17 @@
-//! These tests need GPUI's Metal renderer. Other platforms still run the native
-//! event/state suite; no fake renderer is substituted for missing GPU support.
+//! These tests need GPUI's real offscreen renderer: Metal on macOS or WGPU on
+//! Linux. No fake renderer is substituted for missing GPU support.
 fn main() {
-    #[cfg(target_os = "macos")]
-    macos::run();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    rendering::run();
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     println!("rendering: skipped; GPUI does not supply a headless renderer on this platform");
 }
 
-#[cfg(target_os = "macos")]
-mod macos {
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod rendering {
     use gpui_kit::{
         App, AppContext, AssetSource, Bounds, Context, Entity, Focusable as _, HeadlessAppContext,
-        Pixels, Render, Result, Rgba, SharedString, Window,
+        MouseButton, Pixels, Render, Result, Rgba, SharedString, Window,
         assets::Assets,
         component::{
             ActiveTheme, IconName, IndexPath, Theme, ThemeMode,
@@ -21,14 +21,14 @@ mod macos {
             list::{List, ListDelegate, ListItem, ListState},
             menu::{PopupMenu, PopupMenuItem},
             table::{Column, DataTable, TableDelegate, TableState},
-            text::TextView,
+            text::{TextView, TextViewState},
         },
-        div,
+        div, hsla,
         prelude::*,
         px, size,
-        test::TestWindowExt,
+        test::{TestEventExt, TestQueryExt, TestWindowExt},
     };
-    use std::{borrow::Cow, sync::Arc};
+    use std::{borrow::Cow, cell::Cell, rc::Rc, sync::Arc};
 
     // A deliberate rendering defect: the production Checkbox keeps its state and
     // behavior, but its check-mark asset contains no path.
@@ -95,7 +95,7 @@ mod macos {
         })
         .unwrap();
         cx.capture_screenshot(handle)
-            .expect("Metal rendering must be available")
+            .expect("offscreen rendering must be available")
             .into_raw()
     }
 
@@ -111,6 +111,120 @@ mod macos {
             expected != missing,
             "checked() alone cannot detect a missing check mark"
         );
+    }
+
+    struct ControlledCheckbox {
+        checked: Rc<Cell<bool>>,
+        changes: Rc<Cell<usize>>,
+    }
+    impl Render for ControlledCheckbox {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().bg(cx.theme().background).p_4().child(
+                Checkbox::new("updates")
+                    .accessibility_label("Receive updates")
+                    .checked(self.checked.get())
+                    .on_change(cx.listener(|this, checked, _, cx| {
+                        this.checked.set(*checked);
+                        this.changes.set(this.changes.get() + 1);
+                        cx.notify();
+                    })),
+            )
+        }
+    }
+
+    fn checkbox_release_repaints_the_controlled_value(mode: ThemeMode) {
+        let mut cx = context(Arc::new(Assets));
+        cx.update(|cx| Theme::change(mode, None, cx));
+        let checked = Rc::new(Cell::new(false));
+        let changes = Rc::new(Cell::new(0));
+        let handle = open_window(&mut cx, (80., 60.), {
+            let checked = checked.clone();
+            let changes = changes.clone();
+            move |_, _| ControlledCheckbox { checked, changes }
+        });
+        let bounds = cx
+            .update_window(handle, |_, window, _| {
+                let checkbox = window.find_by_label("Receive updates");
+                assert_eq!(checkbox.checked(), Some(false));
+                checkbox.bounds()
+            })
+            .unwrap();
+        let (unchecked_fill, checked_fill) = cx.update(|cx| {
+            let input = Rgba::from(cx.theme().input_background());
+            let background = Rgba::from(cx.theme().background);
+            (
+                // Dark input fills are translucent over the window background.
+                Rgba {
+                    r: input.r * input.a + background.r * (1. - input.a),
+                    g: input.g * input.a + background.g * (1. - input.a),
+                    b: input.b * input.a + background.b * (1. - input.a),
+                    a: 1.,
+                },
+                Rgba::from(cx.theme().tokens.primary.color),
+            )
+        });
+        // The lower-left indicator interior is clear of the border and animated glyph.
+        let fill = |capture: &Capture| {
+            capture.get_pixel(
+                capture.device(bounds.left() + px(3.)),
+                capture.device(bounds.bottom() - px(3.)),
+            )
+        };
+        assert!(is_ring(
+            fill(&Capture::take(&mut cx, handle)),
+            unchecked_fill
+        ));
+
+        for expected in [true, false] {
+            let previous_changes = changes.get();
+            cx.update_window(handle, |_, window, cx| {
+                window.pointer_move(bounds.center(), None, cx);
+                window.pointer_down(bounds.center(), MouseButton::Left, cx);
+                assert_eq!(
+                    window.find_by_label("Receive updates").checked(),
+                    Some(!expected)
+                );
+                assert_eq!(checked.get(), !expected);
+                assert_eq!(
+                    changes.get(),
+                    previous_changes,
+                    "a press must not commit the value"
+                );
+            })
+            .unwrap();
+            let pressed = Capture::take(&mut cx, handle);
+            assert!(is_ring(
+                fill(&pressed),
+                if expected {
+                    unchecked_fill
+                } else {
+                    checked_fill
+                }
+            ));
+            cx.update_window(handle, |_, window, cx| {
+                window.pointer_up(bounds.center(), MouseButton::Left, cx);
+                assert_eq!(
+                    window.find_by_label("Receive updates").checked(),
+                    Some(expected)
+                );
+                assert_eq!(checked.get(), expected);
+                assert_eq!(changes.get(), previous_changes + 1);
+            })
+            .unwrap();
+            let released = Capture::take(&mut cx, handle);
+            assert!(
+                is_ring(
+                    fill(&released),
+                    if expected {
+                        checked_fill
+                    } else {
+                        unchecked_fill
+                    }
+                ),
+                "the rendered fill must follow the owner's checked value ({mode:?}, checked = {expected}, bounds = {bounds:?}, actual = {:?}, checked fill = {checked_fill:?}, unchecked fill = {unchecked_fill:?})",
+                fill(&released)
+            );
+        }
     }
 
     struct Editor {
@@ -247,6 +361,61 @@ mod macos {
                 "lines wrapped at {width}px painted {columns} device columns past the wrap width"
             );
         }
+    }
+
+    struct Selected {
+        state: Entity<TextViewState>,
+    }
+    impl Render for Selected {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .bg(cx.theme().background)
+                .text_color(cx.theme().foreground)
+                .p_2()
+                .child(TextView::new(&self.state).selectable(true))
+        }
+    }
+
+    /// The selection is a background under the glyphs: with an opaque
+    /// selection color the selected text must still be painted over it,
+    /// not hidden behind a solid block.
+    fn selected_text_stays_over_an_opaque_selection() {
+        let mut cx = context(Arc::new(Assets));
+        let selection = hsla(0.6, 0.9, 0.5, 1.);
+        let foreground = cx.update(|cx| {
+            Theme::global_mut(cx).selection = selection;
+            Theme::sync_base(cx);
+            Rgba::from(cx.theme().foreground)
+        });
+        let state = cx.update(|cx| cx.new(|cx| TextViewState::markdown("Ocean ocean", cx)));
+        let handle = open_window(&mut cx, (240., 60.), {
+            let state = state.clone();
+            move |_, _| Selected { state }
+        });
+        cx.update_window(handle, |_, window, cx| {
+            state.update(cx, |state, cx| state.select_all(cx));
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let capture = Capture::take(&mut cx, handle);
+        let selection = Rgba::from(selection);
+        let (mut selected, mut glyphs) = (0, 0);
+        for y in 0..capture.height as i32 {
+            for x in 0..capture.width as i32 {
+                let pixel = capture.get_pixel(x, y);
+                if is_ring(pixel, selection) {
+                    selected += 1;
+                } else if is_ring(pixel, foreground) {
+                    glyphs += 1;
+                }
+            }
+        }
+        assert!(selected > 0, "select all must paint the selection");
+        assert!(
+            glyphs > 0,
+            "the selection must not cover the selected glyphs"
+        );
     }
 
     /// Where each button is expected to draw its focus line.
@@ -841,12 +1010,20 @@ mod macos {
         println!("running pixels_detect_missing_check_even_when_checked_state_is_correct");
         pixels_detect_missing_check_even_when_checked_state_is_correct();
         println!("passed pixels_detect_missing_check_even_when_checked_state_is_correct");
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            println!("running checkbox_release_repaints_the_controlled_value ({mode:?})");
+            checkbox_release_repaints_the_controlled_value(mode);
+            println!("passed checkbox_release_repaints_the_controlled_value ({mode:?})");
+        }
         println!("running pixels_detect_missing_input_text_even_when_value_is_correct");
         pixels_detect_missing_input_text_even_when_value_is_correct();
         println!("passed pixels_detect_missing_input_text_even_when_value_is_correct");
         println!("running wrapped_cjk_with_inline_code_stays_within_the_wrap_width");
         wrapped_cjk_with_inline_code_stays_within_the_wrap_width();
         println!("passed wrapped_cjk_with_inline_code_stays_within_the_wrap_width");
+        println!("running selected_text_stays_over_an_opaque_selection");
+        selected_text_stays_over_an_opaque_selection();
+        println!("passed selected_text_stays_over_an_opaque_selection");
         for mode in [ThemeMode::Light, ThemeMode::Dark] {
             println!("running focus_lines_stay_off_content_and_contrast_with_fills ({mode:?})");
             focus_lines_stay_off_content_and_contrast_with_fills(mode);
@@ -866,6 +1043,6 @@ mod macos {
             table_shows_keyboard_focus_only(focus_ring);
             println!("passed table_shows_keyboard_focus_only (focus_ring = {focus_ring})");
         }
-        println!("rendering: 10 passed (Metal)");
+        println!("rendering: 13 passed (real offscreen renderer)");
     }
 }

@@ -27,7 +27,7 @@ use crate::{
         TextViewStyle,
         document::ParsedDocument,
         format,
-        node::{self, NodeContext},
+        node::{self, InlineNode, LinkMark, NodeContext, Paragraph, TextMark},
         range_highlight::{
             LeafRemap, PendingReveal, RangeHighlightFrame, RenderedIndex, RevealRequest,
         },
@@ -67,6 +67,38 @@ pub(super) enum TextViewFormat {
     Markdown,
     /// HTML view
     Html,
+    /// Plain text with explicit link ranges.
+    LinkedText,
+}
+
+/// A UTF-8 byte range in plain text rendered as a link.
+///
+/// Links are applied in order. Empty, overlapping, out-of-bounds, and
+/// non-character-boundary ranges are ignored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextViewLink {
+    range: Range<usize>,
+    url: SharedString,
+}
+
+impl TextViewLink {
+    /// Create a link targeting a URL.
+    pub fn new(range: Range<usize>, url: impl Into<SharedString>) -> Self {
+        Self {
+            range,
+            url: url.into(),
+        }
+    }
+
+    /// The UTF-8 byte range in the source text.
+    pub fn range(&self) -> Range<usize> {
+        self.range.clone()
+    }
+
+    /// The target URL passed to the view's link click handler.
+    pub fn url(&self) -> &SharedString {
+        &self.url
+    }
 }
 
 /// The format of the text returned by
@@ -83,6 +115,19 @@ pub enum SelectionFormat {
     /// reconstructed as Markdown from the parsed nodes (e.g. selecting inside
     /// a `**bold**` run yields `**bold**`).
     Source,
+    /// The rendered text while the selection stays within one style, the
+    /// source as soon as it takes in several.
+    ///
+    /// A style is everything the source would spell out around the selected
+    /// text: the marks of an inline run (emphasis, code, a link's URL) and the
+    /// block it sits in (a heading's `#`, a list marker, a code fence). So
+    /// selecting inside a `**bold**` run, a link or a code block yields the
+    /// text alone, also when the selection reaches exactly up to the run's
+    /// boundaries, while a selection across that boundary, into a second
+    /// block, or over an inline object copies like [`Self::Source`]. Two blocks
+    /// count as two styles even when their marks match, since the source of
+    /// either spells out where one ends. Select-all copies the source verbatim.
+    SourceAcrossStyles,
 }
 
 /// One text element's laid-out vertical extent, reported by `Inline` during
@@ -126,9 +171,10 @@ pub struct TextViewState {
     pub(super) link_presentation: Option<std::sync::Arc<super::inline_link::LinkPresentationFn>>,
     pub(super) issue_link_base: Option<SharedString>,
     pub(super) markdown_extensions: Arc<MarkdownExtensions>,
+    linked_text_links: Arc<[TextViewLink]>,
 
     pub(super) is_selecting: bool,
-    /// Logical ranges retained across an explicitly requested resource reflow.
+    /// Logical ranges retained across compatible resource or presentation reflow.
     pub(super) preserve_inline_selection: bool,
     select_all: bool,
     pub(super) auto_scroll: AutoScroll,
@@ -194,11 +240,28 @@ impl TextViewState {
         Self::new(TextViewFormat::Html, text, false, cx)
     }
 
+    /// Create a selectable plain-text view with explicit link ranges.
+    ///
+    /// Render with `TextView::new(&state).selectable(true)` to enable selection.
+    pub fn linked_text(text: &str, links: Vec<TextViewLink>, cx: &mut Context<Self>) -> Self {
+        Self::new_with_links(TextViewFormat::LinkedText, text, links.into(), false, cx)
+    }
+
     /// Create a new TextViewState. A `TextView` element creates its own with
     /// its parse policy, so the first layout already honours it.
     pub(super) fn new(
         format: TextViewFormat,
         text: &str,
+        parse_synchronously: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_links(format, text, Arc::default(), parse_synchronously, cx)
+    }
+
+    fn new_with_links(
+        format: TextViewFormat,
+        text: &str,
+        links: Arc<[TextViewLink]>,
         parse_synchronously: bool,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -210,6 +273,18 @@ impl TextViewState {
         let _receive_task = cx.spawn({
             async move |weak_self, cx| {
                 while let Ok(parsed_update) = rx_result.recv().await {
+                    // A result that commits nothing — the background parser
+                    // acknowledging a synchronous parse — leaves the state
+                    // alone: updating it would tell GPUI Fast's retained
+                    // views that read it that it changed.
+                    let Ok(commits) =
+                        weak_self.read_with(cx, |state, _| state.commits(&parsed_update))
+                    else {
+                        break;
+                    };
+                    if !commits {
+                        continue;
+                    }
                     _ = weak_self.update(cx, |state, cx| {
                         state.commit_parsed_update(parsed_update, cx);
                     });
@@ -247,6 +322,7 @@ impl TextViewState {
             issue_link_base: None,
             image_source: None,
             markdown_extensions: Arc::default(),
+            linked_text_links: links,
             is_selecting: false,
             preserve_inline_selection: false,
             auto_scroll: AutoScroll::default(),
@@ -362,6 +438,28 @@ impl TextViewState {
         self.increment_update(text, false, cx);
     }
 
+    /// Replace text and its link ranges atomically on a linked-text state.
+    ///
+    /// On Markdown and HTML states this updates the text using their existing
+    /// format; link ranges apply only to states created with [`Self::linked_text`].
+    pub fn set_linked_text(
+        &mut self,
+        text: &str,
+        links: Vec<TextViewLink>,
+        cx: &mut Context<Self>,
+    ) {
+        let links: Arc<[TextViewLink]> = links.into();
+        if self.text == text && self.linked_text_links == links {
+            return;
+        }
+        self.stream_fade.note_replace();
+        self.text.clear();
+        self.text.push_str(text);
+        self.linked_text_links = links;
+        self.parsed_error = None;
+        self.increment_update(text, false, cx);
+    }
+
     /// [`Self::set_text`] for the text a `TextView` element hands over every
     /// frame: the string it handed over last time (the same allocation, not
     /// merely equal bytes) is recognized without a comparison, as long as the
@@ -454,8 +552,14 @@ impl TextViewState {
     fn effective_format(&self) -> SelectionFormat {
         match self.format {
             TextViewFormat::Markdown => self.selection_format,
-            TextViewFormat::Html => SelectionFormat::Plain,
+            TextViewFormat::Html | TextViewFormat::LinkedText => SelectionFormat::Plain,
         }
+    }
+
+    /// A pending full replacement leaves the previous document on screen, but
+    /// that document must no longer supply clipboard content.
+    pub(super) fn has_current_copy_document(&self) -> bool {
+        self.committed_revision >= self.full_update_revision
     }
 
     /// Return the selected text, with `blocks` bounding which top-level blocks
@@ -468,7 +572,10 @@ impl TextViewState {
         let format = self.effective_format();
 
         if self.select_all {
-            if format == SelectionFormat::Source {
+            if self.format == TextViewFormat::LinkedText {
+                return self.source().to_string();
+            }
+            if format != SelectionFormat::Plain {
                 return self.source().to_string();
             }
 
@@ -506,10 +613,14 @@ impl TextViewState {
     /// when the task can outlive this view. This does not reparse the document.
     /// Existing logical selection is retained until the next selection gesture.
     pub fn invalidate_inline_layout(&mut self, cx: &mut Context<Self>) {
+        self.preserve_selection_for_reflow();
+        cx.notify();
+    }
+
+    pub(super) fn preserve_selection_for_reflow(&mut self) {
         self.preserve_inline_selection = true;
         self.compatible_layout_update = true;
         self.invalidate_measured_heights();
-        cx.notify();
     }
 
     fn increment_update(&mut self, text: &str, append: bool, cx: &mut Context<Self>) {
@@ -517,6 +628,10 @@ impl TextViewState {
         if !append {
             self.full_update_revision = self.revision;
             self.selection_revision = self.selection_revision.wrapping_add(1);
+            // Old native layouts must not project a still-active gesture back
+            // into replaced content, including while a large parse is pending.
+            self.selection_adapter.clear_copy_projections(cx);
+            self.parsed_content.document.clear_selection();
         }
         let parse_synchronously =
             !append && (self.parse_synchronously || text.len() <= MAX_SYNC_FULL_REPLACE_BYTES);
@@ -532,6 +647,7 @@ impl TextViewState {
             },
             pending_text: text.to_string(),
             markdown_extensions: self.markdown_extensions.clone(),
+            linked_text_links: self.linked_text_links.clone(),
         };
 
         // Keep small full replacements synchronous so their first layout has
@@ -569,6 +685,19 @@ impl TextViewState {
         _ = self.tx.try_send(update_options);
     }
 
+    /// Whether [`Self::commit_parsed_update`] commits `parsed_update`: it is
+    /// not older than what is committed or than the last replacement, nor
+    /// the background parser acknowledging a synchronous parse.
+    fn commits(&self, parsed_update: &ParsedUpdate) -> bool {
+        if parsed_update.revision < self.full_update_revision
+            || parsed_update.revision <= self.committed_revision
+        {
+            return false;
+        }
+        debug_assert!(!parsed_update.baseline_ack || parsed_update.full_parse);
+        !parsed_update.baseline_ack
+    }
+
     /// Commit a result of the background parser.
     ///
     /// A stream that appends faster than a parse completes has always moved
@@ -578,13 +707,7 @@ impl TextViewState {
     /// the current text and is committed; one from before that replacement,
     /// or older than what is already committed, is discarded.
     fn commit_parsed_update(&mut self, parsed_update: ParsedUpdate, cx: &mut Context<Self>) {
-        if parsed_update.revision < self.full_update_revision
-            || parsed_update.revision <= self.committed_revision
-        {
-            return;
-        }
-        if parsed_update.baseline_ack {
-            debug_assert!(parsed_update.full_parse);
+        if !self.commits(&parsed_update) {
             return;
         }
 
@@ -966,6 +1089,19 @@ impl TextViewState {
         self.selection_adapter.selection_points(cx)
     }
 
+    /// [`Self::selection_points`] for the text that paints now: a drag that
+    /// started in a table cell selects only in that cell. Call it only while
+    /// painting, so the cell the text is in is known.
+    pub(crate) fn painted_selection_points(
+        &self,
+        cx: &App,
+    ) -> Option<(Point<Pixels>, Point<Pixels>)> {
+        if !self.selectable {
+            return None;
+        }
+        self.selection_adapter.painted_selection_points(cx)
+    }
+
     pub(crate) fn has_selection(&self, cx: &App) -> bool {
         self.has_view_selection()
             || self.selection_points(cx).is_some()
@@ -1050,9 +1186,7 @@ impl Render for TextViewState {
             // ListState invalidates its cached rows for width changes, but does
             // not know that an inherited font or rem change affects offscreen
             // inline metrics. Retain logical selections just as for resources.
-            self.preserve_inline_selection = true;
-            self.compatible_layout_update = true;
-            self.invalidate_measured_heights();
+            self.preserve_selection_for_reflow();
         }
         self.layout_text_style = Some(typography);
         let state = cx.entity();
@@ -1118,14 +1252,24 @@ impl Render for TextViewState {
                     has_selection_snapshot,
                     is_selecting,
                     compatible_layout_update,
+                    preserve_width_selection,
                 ) = {
                     let state = state.read(cx);
+                    let has_selection_snapshot = state.selection_adapter.has_selection_snapshot(cx);
+                    let preserve_width_selection = !state.is_selecting
+                        && state.bounds().size.width != bounds.size.width
+                        && (has_selection_snapshot || state.has_view_selection());
                     (
                         state.bounds().size != bounds.size,
                         state.selection_adapter.is_part_of_window_selection(cx),
-                        state.selection_adapter.has_selection_snapshot(cx),
+                        has_selection_snapshot,
                         state.is_selecting,
-                        state.compatible_layout_update,
+                        // A measurement prepaint must not consume compatibility
+                        // before the same entity's visible column prepaints.
+                        state.compatible_layout_update
+                            || preserve_width_selection
+                            || state.preserve_inline_selection,
+                        preserve_width_selection,
                     )
                 };
                 let mut revision_changed = false;
@@ -1133,6 +1277,11 @@ impl Render for TextViewState {
                     revision_changed = state
                         .selection_adapter
                         .update_layout_revision(state.selection_revision, state.is_selecting);
+                    if preserve_width_selection {
+                        // ListState already remeasures width changes. Arm logical
+                        // retention before inline paint without invalidating rows again.
+                        state.preserve_inline_selection = true;
+                    }
                     state.update_bounds(bounds, cx);
                     state.compatible_layout_update = false;
                 });
@@ -1221,6 +1370,7 @@ struct UpdateOptions {
     append: bool,
     mode: ParseMode,
     markdown_extensions: Arc<MarkdownExtensions>,
+    linked_text_links: Arc<[TextViewLink]>,
 }
 
 impl UpdateOptions {
@@ -1228,6 +1378,7 @@ impl UpdateOptions {
         if next.append {
             self.pending_text.push_str(&next.pending_text);
             self.revision = next.revision;
+            self.linked_text_links = next.linked_text_links;
             if self.mode != ParseMode::Replace {
                 self.mode = ParseMode::Compatible;
             }
@@ -1310,6 +1461,7 @@ fn parse_content(
     let new_document = match format {
         TextViewFormat::Markdown => format::markdown::parse(&source, &mut node_cx),
         TextViewFormat::Html => format::html::parse(&source, &mut node_cx),
+        TextViewFormat::LinkedText => Ok(parse_linked_text(&source, &options.linked_text_links)),
     }?;
 
     if options.append {
@@ -1324,6 +1476,49 @@ fn parse_content(
     Ok(content)
 }
 
+fn parse_linked_text(source: &str, links: &[TextViewLink]) -> ParsedDocument {
+    let mut paragraph = Paragraph::default();
+    paragraph.set_span(node::Span {
+        start: 0,
+        end: source.len(),
+    });
+    let mut cursor = 0;
+
+    for link in links {
+        if link.range.start < cursor
+            || link.range.end > source.len()
+            || link.range.start >= link.range.end
+            || !source.is_char_boundary(link.range.start)
+            || !source.is_char_boundary(link.range.end)
+        {
+            continue;
+        }
+        if cursor < link.range.start {
+            paragraph.push(InlineNode::new(&source[cursor..link.range.start]));
+        }
+        let linked = &source[link.range.clone()];
+        paragraph.push(InlineNode::new(linked).marks(vec![(
+            0..linked.len(),
+            TextMark {
+                link: Some(LinkMark {
+                    url: link.url.clone(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )]));
+        cursor = link.range.end;
+    }
+    if cursor < source.len() {
+        paragraph.push(InlineNode::new(&source[cursor..]));
+    }
+
+    ParsedDocument {
+        source: source.to_owned().into(),
+        blocks: vec![node::BlockNode::Paragraph(paragraph)].into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1332,6 +1527,154 @@ mod tests {
         node::{BlockNode, Span},
     };
     use gpui::{Entity, TestAppContext};
+
+    #[test]
+    fn linked_text_preserves_source_and_ignores_invalid_ranges() {
+        let source = "é link\nnext";
+        let document = parse_linked_text(
+            source,
+            &[
+                TextViewLink::new(1..2, "invalid-boundary"),
+                TextViewLink::new(3..7, "https://example.com"),
+                TextViewLink::new(4..6, "overlap"),
+                TextViewLink::new(8..99, "out-of-bounds"),
+            ],
+        );
+        assert_eq!(document.source.as_ref(), source);
+        let BlockNode::Paragraph(paragraph) = &document.blocks[0] else {
+            panic!("expected paragraph")
+        };
+        assert_eq!(
+            paragraph
+                .children
+                .iter()
+                .map(|child| child.text.as_ref())
+                .collect::<String>(),
+            source
+        );
+        let links = paragraph
+            .children
+            .iter()
+            .flat_map(|child| &child.marks)
+            .filter_map(|(_, mark)| mark.link.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url.as_ref(), "https://example.com");
+    }
+
+    #[test]
+    fn coalesced_linked_text_append_keeps_latest_links() {
+        let mut options = UpdateOptions {
+            revision: 1,
+            pending_text: "first".into(),
+            append: false,
+            mode: ParseMode::Replace,
+            markdown_extensions: Arc::default(),
+            linked_text_links: Arc::default(),
+        };
+        let links: Arc<[TextViewLink]> =
+            vec![TextViewLink::new(0..5, "https://example.com")].into();
+        options.merge(UpdateOptions {
+            revision: 2,
+            pending_text: " second".into(),
+            append: true,
+            mode: ParseMode::Compatible,
+            markdown_extensions: Arc::default(),
+            linked_text_links: links.clone(),
+        });
+        assert_eq!(options.linked_text_links, links);
+        let content = parse_content(
+            TextViewFormat::LinkedText,
+            ParsedContent::default(),
+            &options,
+        )
+        .unwrap();
+        assert_eq!(content.document.source.as_ref(), "first second");
+    }
+
+    #[gpui::test]
+    fn linked_text_initial_parse_and_link_only_update(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let state = cx.update(|cx| {
+            cx.new(|cx| {
+                TextViewState::linked_text("link", vec![TextViewLink::new(0..4, "first")], cx)
+            })
+        });
+        state.update(cx, |state, cx| {
+            assert_eq!(state.source().as_ref(), "link");
+            state.set_linked_text("link", vec![TextViewLink::new(0..4, "second")], cx);
+            let BlockNode::Paragraph(paragraph) = &state.parsed_content.document.blocks[0] else {
+                panic!("expected paragraph")
+            };
+            assert_eq!(
+                paragraph.children[0].marks[0]
+                    .1
+                    .link
+                    .as_ref()
+                    .unwrap()
+                    .url
+                    .as_ref(),
+                "second"
+            );
+        });
+    }
+
+    /// A view reading a text view state, inside a view notified on every
+    /// frame, counting its renders.
+    #[cfg(feature = "gpui-fast")]
+    mod parse_ack {
+        use std::{cell::Cell, rc::Rc};
+
+        use gpui::{
+            AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
+            TestAppContext, Window, div,
+        };
+
+        use super::super::TextViewState;
+
+        struct Reader {
+            state: Entity<TextViewState>,
+            renders: Rc<Cell<usize>>,
+        }
+
+        impl Render for Reader {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.renders.set(self.renders.get() + 1);
+                div().child(self.state.read(cx).text.clone())
+            }
+        }
+
+        struct Holder {
+            reader: Entity<Reader>,
+        }
+
+        impl Render for Holder {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().child(self.reader.clone())
+            }
+        }
+
+        /// The background parser acknowledging a text parsed as it was set
+        /// commits nothing, and leaves the state alone: a view that read it,
+        /// in a view notified for something else, is not built again.
+        #[gpui::test]
+        fn acknowledging_a_parse_leaves_its_readers_retained(cx: &mut TestAppContext) {
+            cx.update(crate::init);
+            let renders = Rc::new(Cell::new(0));
+            let (holder, cx) = cx.add_window_view(|_, cx| Holder {
+                reader: cx.new(|cx| Reader {
+                    state: cx.new(|cx| TextViewState::markdown("Some **text**.", cx)),
+                    renders: renders.clone(),
+                }),
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let before = renders.get();
+            cx.run_until_parked();
+            holder.update(cx, |_, cx| cx.notify());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(renders.get(), before, "the reader rendered again");
+        }
+    }
 
     mod stream_fade {
         use std::{cell::Cell, ops::Range, rc::Rc, time::Duration};
@@ -1748,6 +2091,7 @@ mod tests {
             append: true,
             mode: ParseMode::Compatible,
             markdown_extensions: Arc::default(),
+            linked_text_links: Arc::default(),
         };
         ParsedUpdate {
             revision,
@@ -2030,6 +2374,7 @@ mod tests {
             append: true,
             mode: ParseMode::Compatible,
             markdown_extensions: Arc::default(),
+            linked_text_links: Arc::default(),
         };
 
         options.merge(UpdateOptions {
@@ -2038,6 +2383,7 @@ mod tests {
             append: false,
             mode: ParseMode::BaselineAck,
             markdown_extensions: Arc::default(),
+            linked_text_links: Arc::default(),
         });
         options.merge(UpdateOptions {
             revision: 3,
@@ -2045,6 +2391,7 @@ mod tests {
             append: true,
             mode: ParseMode::Compatible,
             markdown_extensions: Arc::default(),
+            linked_text_links: Arc::default(),
         });
 
         assert_eq!(options.revision, 3);
@@ -2060,6 +2407,7 @@ mod tests {
             append: false,
             mode: ParseMode::Replace,
             markdown_extensions: Arc::default(),
+            linked_text_links: Arc::default(),
         };
 
         options.merge(UpdateOptions {
@@ -2068,6 +2416,7 @@ mod tests {
             append: true,
             mode: ParseMode::Compatible,
             markdown_extensions: Arc::default(),
+            linked_text_links: Arc::default(),
         });
 
         assert_eq!(options.revision, 2);
@@ -2093,6 +2442,7 @@ mod tests {
                     ParseMode::Compatible
                 },
                 markdown_extensions: Arc::default(),
+                linked_text_links: Arc::default(),
             })
             .unwrap();
         }
@@ -2205,6 +2555,7 @@ mod tests {
             append: false,
             mode: ParseMode::Replace,
             markdown_extensions: Arc::default(),
+            linked_text_links: Arc::default(),
         };
         let content = parse_content(TextViewFormat::Markdown, ParsedContent::default(), &options)
             .expect("initial parse");
@@ -2217,6 +2568,7 @@ mod tests {
                 append: true,
                 mode: ParseMode::Compatible,
                 markdown_extensions: Arc::default(),
+                linked_text_links: Arc::default(),
             },
         )
         .expect("incremental parse");
@@ -2242,6 +2594,7 @@ mod tests {
                 append: false,
                 mode: ParseMode::Replace,
                 markdown_extensions: Arc::default(),
+                linked_text_links: Arc::default(),
             },
         )
         .expect("initial list parse");
@@ -2254,6 +2607,7 @@ mod tests {
                 append: true,
                 mode: ParseMode::Compatible,
                 markdown_extensions: Arc::default(),
+                linked_text_links: Arc::default(),
             },
         )
         .expect("streamed list continuation parse");
@@ -2670,6 +3024,7 @@ mod tests {
                 append: false,
                 mode: ParseMode::Replace,
                 markdown_extensions: Arc::default(),
+                linked_text_links: Arc::default(),
             };
             let new = parse_content(TextViewFormat::Markdown, ParsedContent::default(), &options)
                 .unwrap()

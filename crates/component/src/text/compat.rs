@@ -86,6 +86,16 @@ impl TextView {
             stream_fade: None,
         }
     }
+    /// Sets whether links are underlined at rest. Defaults to `true`.
+    pub fn link_underline(mut self, underline: bool) -> Self {
+        self.inner = self.inner.link_underline(underline);
+        self
+    }
+    /// Sets whether links are underlined while hovered. Defaults to `false`.
+    pub fn link_underline_on_hover(mut self, underline: bool) -> Self {
+        self.inner = self.inner.link_underline_on_hover(underline);
+        self
+    }
     /// Sets the style, folded onto the one derived from the active theme.
     pub fn style(mut self, style: TextViewStyle) -> Self {
         self.text_style = Some(style);
@@ -94,6 +104,13 @@ impl TextView {
     /// Sets whether the text can be selected with the mouse.
     pub fn selectable(mut self, value: bool) -> Self {
         self.inner = self.inner.selectable(value);
+        self
+    }
+    /// Refines inline code typography, background, border, radius, and padding
+    /// over the resolved theme or explicit style. Other layout properties are
+    /// ignored. Unspecified properties are inherited.
+    pub fn inline_code_style(mut self, style: StyleRefinement) -> Self {
+        self.inner = self.inner.inline_code_style(style);
         self
     }
     /// Sets whether a copied selection carries Markdown source or plain text.
@@ -308,7 +325,7 @@ impl Element for TextView {
             // caller ever replaced the theme -- a pointer comparison against
             // the shared default -- rather than comparing two whole themes
             // field by field.
-            #[cfg(feature = "tree-sitter")]
+            #[cfg(any(feature = "tree-sitter", feature = "syntect"))]
             if !std::sync::Arc::ptr_eq(
                 &style.highlight_theme,
                 &crate::highlighter::HighlightTheme::default_light(),

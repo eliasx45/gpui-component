@@ -1,12 +1,16 @@
 use std::{cell::RefCell, ops::RangeInclusive, rc::Rc};
 
 use crate::{
-    TextSelectionContentKey, TextSelectionCoverage, TextSelectionEndpoint, TextSelectionEvent,
-    TextSelectionHandle, TextSelectionRegistration, TextSelectionRun, TextSelectionSnapshot,
+    GlobalState, TextSelectionContentKey, TextSelectionCoverage, TextSelectionEndpoint,
+    TextSelectionEvent, TextSelectionHandle, TextSelectionRegistration, TextSelectionRun,
+    TextSelectionSnapshot,
 };
 use gpui::{App, Bounds, EntityId, Hitbox, Pixels, Point, WeakEntity, Window};
 
-use super::TextViewState;
+use super::{
+    TextViewState, inline::InlineSelectionProjection,
+    inline_object::InlineObjectSelectionProjection, node::CustomBlockSelectionProjection,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CachedBlockEndpoint {
@@ -19,19 +23,29 @@ struct VirtualBlockSelection {
     anchor: Option<CachedBlockEndpoint>,
     cursor: Option<CachedBlockEndpoint>,
     coverage: TextSelectionCoverage,
+    is_selecting: bool,
 }
 
 impl VirtualBlockSelection {
-    fn update(&mut self, snapshot: Option<TextSelectionSnapshot>, entity_id: EntityId) {
+    fn update(&mut self, snapshot: Option<TextSelectionSnapshot>, entity_id: EntityId) -> bool {
         let Some(snapshot) = snapshot else {
+            let changed = self.anchor.is_some() || self.cursor.is_some();
             *self = Self::default();
-            return;
+            return changed;
         };
 
+        // Origin and scroll changes only alter the window projection. They must
+        // not turn a held logical range back into a hit test in reflowed text.
+        let changed = self.anchor.map(|cached| cached.endpoint) != Some(snapshot.anchor())
+            || self.cursor.map(|cached| cached.endpoint) != Some(snapshot.cursor())
+            || self.coverage != snapshot.coverage()
+            || self.is_selecting != snapshot.is_selecting();
         self.coverage = snapshot.coverage();
+        self.is_selecting = snapshot.is_selecting();
 
         Self::update_endpoint(&mut self.anchor, snapshot.anchor(), entity_id);
         Self::update_endpoint(&mut self.cursor, snapshot.cursor(), entity_id);
+        changed
     }
 
     fn update_endpoint(
@@ -72,15 +86,57 @@ impl VirtualBlockSelection {
 #[derive(Clone)]
 pub(super) struct TextViewSelectionAdapter {
     selection: TextSelectionHandle,
+    /// What the view's text painted this frame, shared by the adapter's
+    /// clones. Inlines report it as they paint, through a read of the view's
+    /// state: reporting it is not a change of the view.
+    frame: Rc<RefCell<PaintedText>>,
+    layout_revision: Option<usize>,
+}
+
+/// The text a [`TextViewSelectionAdapter`]'s view painted this frame.
+#[derive(Default)]
+struct PaintedText {
     text_bounds: Vec<Bounds<Pixels>>,
     text_runs: Vec<TextSelectionRun>,
     /// The runs this view painted this frame, in document order, which its
     /// selection is made against (see `text_selection::runs`).
     view_runs: Vec<crate::text_selection::runs::TextRun>,
+    /// Each with the table cell it painted in, if any.
+    copy_projections: Vec<(CopyProjection, Option<Bounds<Pixels>>)>,
     /// The caret boxes at the first and last selected character painted this
     /// frame, where the touch handles go.
     selection_edges: Option<(Bounds<Pixels>, Bounds<Pixels>)>,
-    layout_revision: Option<usize>,
+}
+
+pub(super) enum CopyProjection {
+    Text(InlineSelectionProjection),
+    InlineObject(InlineObjectSelectionProjection),
+    CustomBlock(CustomBlockSelectionProjection),
+}
+
+impl CopyProjection {
+    fn reset(&self) {
+        if let Self::Text(projection) = self {
+            projection.reset();
+        }
+    }
+
+    fn project(&self, start: Point<Pixels>, end: Point<Pixels>) {
+        match self {
+            Self::Text(projection) => projection.project(start, end),
+            Self::InlineObject(projection) => projection.project(start, end),
+            Self::CustomBlock(projection) => projection.project(start, end),
+        }
+    }
+
+    /// Selects nothing: the selection started in a table cell this is not in.
+    fn deselect(&self) {
+        match self {
+            Self::Text(projection) => projection.reset(),
+            Self::InlineObject(projection) => projection.deselect(),
+            Self::CustomBlock(projection) => projection.deselect(),
+        }
+    }
 }
 
 impl TextViewSelectionAdapter {
@@ -88,6 +144,7 @@ impl TextViewSelectionAdapter {
         let selection = TextSelectionHandle::new("", cx);
         let selection_id = selection.entity_id();
         let virtual_blocks = Rc::new(RefCell::new(VirtualBlockSelection::default()));
+        let frame = Rc::new(RefCell::new(PaintedText::default()));
 
         let view_for_events = view.clone();
         let blocks_for_events = virtual_blocks.clone();
@@ -97,10 +154,12 @@ impl TextViewSelectionAdapter {
                     TextSelectionEvent::SelectionChanged(snapshot) => {
                         let snapshot = *snapshot;
                         let _ = view_for_events.update(cx, |state, cx| {
-                            state.preserve_inline_selection = false;
-                            blocks_for_events
+                            let changed = blocks_for_events
                                 .borrow_mut()
                                 .update(snapshot, selection_id);
+                            if snapshot.is_none() || changed {
+                                state.preserve_inline_selection = false;
+                            }
                             state.is_selecting =
                                 snapshot.is_some_and(|snapshot| snapshot.is_selecting());
                             cx.notify();
@@ -140,14 +199,64 @@ impl TextViewSelectionAdapter {
 
         let view_for_copy = view.clone();
         let blocks_for_copy = virtual_blocks.clone();
+        let frame_for_copy = frame.clone();
         selection.copy_with(
             move |cx| {
                 let Some(view) = view_for_copy.upgrade() else {
                     return String::new();
                 };
                 let state = view.read(cx);
+                if !state.has_current_copy_document() {
+                    return String::new();
+                }
+                // Read the handle itself: event subscribers may not have run
+                // yet when input and Copy arrive in the same App update.
+                let mut current = VirtualBlockSelection::default();
+                current.update(state.selection_adapter.selection.snapshot(cx), selection_id);
+                let previous = blocks_for_copy.borrow();
+                let range_changed = current.anchor != previous.anchor
+                    || current.cursor != previous.cursor
+                    || current.coverage != previous.coverage;
+                drop(previous);
+                let anchor_cell = state.selection_adapter.selection.table_cell_selection(cx);
+                // Gesture snapshots are current before paint. Refresh the rich
+                // document's byte ranges from its retained native layouts
+                // before its existing Plain/Source serializer reads them.
+                if !state.has_view_selection()
+                    && (!state.preserve_inline_selection || range_changed)
+                {
+                    if let Some((start, end)) = state.selection_points(cx) {
+                        // Only represented source states are refreshed.
+                        // Offscreen AST selections retain their logical ends.
+                        let frame = frame_for_copy.borrow();
+                        for (projection, _) in &frame.copy_projections {
+                            projection.reset();
+                        }
+                        for (projection, cell) in &frame.copy_projections {
+                            match crate::global_state::confine_to_cell(
+                                anchor_cell.map(|bounds| (start, bounds)),
+                                *cell,
+                                start,
+                                end,
+                            ) {
+                                Some((start, end)) => projection.project(start, end),
+                                None => projection.deselect(),
+                            }
+                        }
+                    }
+                }
                 let last = state.parsed_content.document.blocks.len().saturating_sub(1);
-                let blocks = blocks_for_copy.borrow().block_range(selection_id, last);
+                let blocks = if anchor_cell.is_some() {
+                    let Some(anchor) = current
+                        .anchor
+                        .filter(|anchor| anchor.endpoint.entity_id() == Some(selection_id))
+                    else {
+                        return String::new();
+                    };
+                    anchor.block_ix.map(|ix| ix..=ix)
+                } else {
+                    current.block_range(selection_id, last)
+                };
                 state.selected_text_in(blocks)
             },
             cx,
@@ -178,10 +287,7 @@ impl TextViewSelectionAdapter {
 
         Self {
             selection,
-            text_bounds: Vec::new(),
-            text_runs: Vec::new(),
-            view_runs: Vec::new(),
-            selection_edges: None,
+            frame,
             layout_revision: None,
         }
     }
@@ -196,35 +302,52 @@ impl TextViewSelectionAdapter {
         changed && !is_selecting
     }
 
-    pub(super) fn begin_frame(&mut self) {
-        self.text_bounds.clear();
-        self.text_runs.clear();
-        self.view_runs.clear();
-        self.selection_edges = None;
+    pub(super) fn clear_copy_projections(&self, cx: &App) {
+        self.selection.clear_table_cell_selection(cx);
+        self.frame.borrow_mut().copy_projections.clear();
+    }
+
+    /// Registers `projection` as it paints, with the table cell it is in.
+    pub(super) fn register_copy_projection(&self, projection: CopyProjection, cx: &App) {
+        let cell = GlobalState::global(cx).table_cell();
+        self.frame
+            .borrow_mut()
+            .copy_projections
+            .push((projection, cell));
+    }
+
+    pub(super) fn begin_frame(&self) {
+        let mut frame = self.frame.borrow_mut();
+        frame.text_bounds.clear();
+        frame.text_runs.clear();
+        frame.view_runs.clear();
+        frame.copy_projections.clear();
+        frame.selection_edges = None;
     }
 
     /// Records one inline's painted selection ends. Inlines paint in document
     /// order, so the first start and the last end are the view's.
-    pub(super) fn register_selection_edges(&mut self, start: Bounds<Pixels>, end: Bounds<Pixels>) {
-        let first = self.selection_edges.map_or(start, |(first, _)| first);
-        self.selection_edges = Some((first, end));
+    pub(super) fn register_selection_edges(&self, start: Bounds<Pixels>, end: Bounds<Pixels>) {
+        let mut frame = self.frame.borrow_mut();
+        let first = frame.selection_edges.map_or(start, |(first, _)| first);
+        frame.selection_edges = Some((first, end));
     }
 
-    pub(super) fn register_text_run(&mut self, run: TextSelectionRun) {
-        self.text_runs.push(run);
+    pub(super) fn register_text_run(&self, run: TextSelectionRun) {
+        self.frame.borrow_mut().text_runs.push(run);
     }
 
-    pub(super) fn register_view_run(&mut self, run: crate::text_selection::runs::TextRun) {
-        self.view_runs.push(run);
+    pub(super) fn register_view_run(&self, run: crate::text_selection::runs::TextRun) {
+        self.frame.borrow_mut().view_runs.push(run);
     }
 
     /// Hands this frame's runs over for [`Self::register`].
-    pub(super) fn take_view_runs(&mut self) -> Vec<crate::text_selection::runs::TextRun> {
-        std::mem::take(&mut self.view_runs)
+    pub(super) fn take_view_runs(&self) -> Vec<crate::text_selection::runs::TextRun> {
+        std::mem::take(&mut self.frame.borrow_mut().view_runs)
     }
 
-    pub(super) fn register_inline(&mut self, bounds: Vec<Bounds<Pixels>>) {
-        self.text_bounds.extend(bounds);
+    pub(super) fn register_inline(&self, bounds: Vec<Bounds<Pixels>>) {
+        self.frame.borrow_mut().text_bounds.extend(bounds);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -239,21 +362,23 @@ impl TextViewSelectionAdapter {
         window: &mut Window,
         cx: &mut App,
     ) {
-        self.selection.set_hit_test_runs(&self.text_runs, cx);
+        let frame = self.frame.borrow();
+        self.selection.set_hit_test_runs(&frame.text_runs, cx);
         let registration = TextSelectionRegistration::new(hitbox, bounds)
             .with_scroll_offset(scroll_offset)
             .with_document_order(document_order)
-            .with_text_bounds(self.text_bounds.clone())
+            .with_text_bounds(frame.text_bounds.clone())
             .with_self_scroll(self_scroll)
             .with_rendered_element(&self.selection, window, cx);
         let registration = match view_runs {
             Some(view_runs) => registration.with_text_view_runs(view_runs),
             None => registration,
         };
-        let registration = match self.selection_edges {
+        let registration = match frame.selection_edges {
             Some((start, end)) => registration.with_selection_edges(start, end),
             None => registration,
         };
+        drop(frame);
         self.selection.register(registration, window, cx);
     }
 
@@ -278,6 +403,27 @@ impl TextViewSelectionAdapter {
     ) {
         self.selection
             .paint_touch_handles(layout, color, window, cx);
+    }
+
+    // Ghostex fork: only upstream's table layout (`TableCellElement`) calls this.
+    #[allow(dead_code)]
+    pub(super) fn record_table_cell(&self, bounds: Bounds<Pixels>, cx: &App) {
+        self.selection.record_table_cell(bounds, cx);
+    }
+
+    pub(super) fn painted_selection_points(
+        &self,
+        cx: &App,
+    ) -> Option<(Point<Pixels>, Point<Pixels>)> {
+        let (anchor, cursor) = self.selection_points(cx)?;
+        crate::global_state::confine_to_cell(
+            self.selection
+                .table_cell_selection(cx)
+                .map(|bounds| (anchor, bounds)),
+            GlobalState::global(cx).table_cell(),
+            anchor,
+            cursor,
+        )
     }
 
     pub(super) fn selection_points(&self, cx: &App) -> Option<(Point<Pixels>, Point<Pixels>)> {
@@ -307,6 +453,14 @@ impl TextViewSelectionAdapter {
 
     #[cfg(test)]
     pub(super) fn text_bounds(&self) -> Vec<Bounds<Pixels>> {
-        self.text_bounds.clone()
+        self.frame.borrow().text_bounds.clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn first_text_position(&self, index: usize) -> Point<Pixels> {
+        let frame = self.frame.borrow();
+        let layout = frame.text_runs.first().unwrap().layout();
+        layout.position_for_index(index).unwrap()
+            + gpui::point(Pixels::ZERO, layout.line_height() / 2.)
     }
 }

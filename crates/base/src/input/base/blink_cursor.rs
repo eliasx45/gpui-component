@@ -33,9 +33,10 @@ impl BlinkCursor {
 
     /// Start the blinking from a visible cursor.
     ///
-    /// Focusing a field calls this twice (`InputState::focus` and then the
-    /// focus listener), so it restarts the cycle instead of toggling: a second
-    /// toggle hid the caret for the first half second after every focus.
+    /// A single focus can start the cursor more than once: `InputState::focus`
+    /// starts it and then the focus observer starts it again, and window
+    /// activation starts it too. Resuming the running cycle would toggle the
+    /// cursor that was just shown off again, so every start restarts the cycle.
     pub(crate) fn start(&mut self, cx: &mut Context<Self>) {
         self.paused = false;
         self.visible = false;
@@ -153,6 +154,28 @@ mod tests {
         cx.executor().advance_clock(INTERVAL);
         cx.run_until_parked();
         assert!(cursor.read_with(cx, |cursor, _| cursor.visible()));
+    }
+
+    #[gpui::test]
+    fn starting_a_blinking_cursor_keeps_it_visible(cx: &mut TestAppContext) {
+        let cursor = cx.new(|_| BlinkCursor::new());
+
+        // Clicking into an input starts the cursor from `focus` and again from
+        // the focus observer; the second start must not hide the new cursor.
+        cursor.update(cx, |cursor, cx| cursor.start(cx));
+        cursor.update(cx, |cursor, cx| cursor.start(cx));
+        cx.run_until_parked();
+        assert!(cursor.read_with(cx, |cursor, _| cursor.visible()));
+
+        // The restart drops the first cycle's timer, so the cursor stays
+        // visible for a full interval before it blinks off.
+        cx.executor()
+            .advance_clock(INTERVAL - Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(cursor.read_with(cx, |cursor, _| cursor.visible()));
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(!cursor.read_with(cx, |cursor, _| cursor.visible()));
     }
 
     #[gpui::test]

@@ -144,6 +144,14 @@ impl TextInputState {
             .update(cx, |state, _| state.set_editor_style(style)))
     }
 
+    pub(crate) fn set_accessibility(
+        &self,
+        accessibility: gpui_base::input::InputAccessibility,
+        cx: &mut App,
+    ) {
+        dispatch!(self, |state| state
+            .update(cx, |state, _| state.set_accessibility(accessibility)))
+    }
     pub(crate) fn set_editor_paddings(&self, paddings: gpui::Edges<gpui::Pixels>, cx: &mut App) {
         dispatch!(self, |state| state
             .update(cx, |state, _| state.set_editor_paddings(paddings)))
@@ -250,11 +258,6 @@ impl TextInputState {
         dispatch!(self, |state| super::overlay::render_overlays(
             state, window, cx
         ))
-    }
-
-    pub(crate) fn replace_all(&self, value: String, window: &mut Window, cx: &mut App) {
-        dispatch!(self, |state| state
-            .update(cx, |state, cx| state.replace_all(value, window, cx)))
     }
 
     /// The text element itself, as a child to place in the frame.
@@ -405,6 +408,14 @@ pub(super) fn sync_focused_input_registry(
 ) {
     let state = state.into();
     let focused = state.focus_handle(cx).is_focused(window);
+    // Every input syncs as it renders; only one that gains or loses focus
+    // changes the registry, and notifying the window state otherwise would
+    // draw the whole window again on every frame an input renders in.
+    let unchanged = WindowState::try_read(window, cx)
+        .is_some_and(|root| (root.focused_input.as_ref() == Some(&state)) == focused);
+    if unchanged {
+        return;
+    }
     WindowState::try_update(window, cx, |root, _, cx| {
         if focused {
             root.focused_input = Some(state.clone());

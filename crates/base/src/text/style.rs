@@ -47,8 +47,8 @@ pub struct TextViewStyle {
     foreground: Hsla,
     muted_foreground: Hsla,
     link: Hsla,
-    // Ghostex fork: whether links are underlined (the chat draws them by color alone).
     link_underline: bool,
+    link_underline_on_hover: bool,
     selection: Hsla,
     code_background: Hsla,
     border: Hsla,
@@ -72,6 +72,12 @@ pub struct TextViewStyle {
     default_cursor: bool,
     // Ghostex fork: the weight `**strong**` text is drawn at (Settings draws it at 500).
     strong_weight: FontWeight,
+    /// Explicit inline code refinements, applied after theme and surface colors.
+    ///
+    /// Ghostex fork: upstream names this `inline_code_style`; the fork keeps
+    /// that name for its inline code chip ([`InlineCodeStyle`]), so upstream's
+    /// refinement is `inline_code_refinement`.
+    inline_code_refinement: StyleRefinement,
     /// The table body background, or the theme surface when `None`. Only
     /// [`Self::on_text_color`] sets it, to let a table on an inverted surface
     /// show that surface.
@@ -86,10 +92,12 @@ impl PartialEq for TextViewStyle {
             && self.muted_foreground == other.muted_foreground
             && self.link == other.link
             && self.link_underline == other.link_underline
+            && self.link_underline_on_hover == other.link_underline_on_hover
             && self.selection == other.selection
             && self.code_background == other.code_background
             && self.border == other.border
-            && (1..=6).all(|level| (self.heading)(level) == (other.heading)(level))
+            && (Arc::ptr_eq(&self.heading, &other.heading)
+                || (1..=6).all(|level| (self.heading)(level) == (other.heading)(level)))
             && self.code_block == other.code_block
             && self.table == other.table
             && self.table_head == other.table_head
@@ -104,6 +112,7 @@ impl PartialEq for TextViewStyle {
             && self.list_marker == other.list_marker
             && self.inline_code == other.inline_code
             && self.inline_code_style == other.inline_code_style
+            && self.inline_code_refinement == other.inline_code_refinement
             && self.prose_swatch == other.prose_swatch
             && self.default_cursor == other.default_cursor
             && self.strong_weight == other.strong_weight
@@ -138,6 +147,7 @@ impl TextViewStyle {
             muted_foreground: colors.muted_foreground,
             link: colors.primary,
             link_underline: true,
+            link_underline_on_hover: false,
             selection: colors.selection,
             code_background: colors.accent,
             border: colors.border,
@@ -163,6 +173,7 @@ impl TextViewStyle {
             prose_swatch: None,
             default_cursor: false,
             strong_weight: FontWeight::BOLD,
+            inline_code_refinement: StyleRefinement::default(),
             table_background: None,
             is_dark,
         }
@@ -186,9 +197,15 @@ impl TextViewStyle {
         self
     }
 
-    /// Sets whether links are underlined (default `true`).
+    /// Sets whether links are underlined at rest. Defaults to `true`.
     pub fn with_link_underline(mut self, underline: bool) -> Self {
         self.link_underline = underline;
+        self
+    }
+
+    /// Sets whether links are underlined while hovered. Defaults to `false`.
+    pub fn with_link_underline_on_hover(mut self, underline: bool) -> Self {
+        self.link_underline_on_hover = underline;
         self
     }
 
@@ -262,6 +279,22 @@ impl TextViewStyle {
     /// typeface.
     pub fn with_prose_swatch(mut self, style: Option<InlineCodeStyle>) -> Self {
         self.prose_swatch = style;
+        self
+    }
+
+    /// Overrides inline code typography and its box presentation (upstream's
+    /// `with_inline_code_style`; see the field's note).
+    ///
+    /// Supports font family, size, features, fallbacks, weight, style, color, underline and
+    /// strikethrough, background, border widths/color/style, corner radii, and
+    /// padding. Sizes and padding resolve pixels/rem against the window.
+    /// Unspecified properties keep the existing defaults. Box layout, margin,
+    /// positioning, overflow, and interaction properties are not used.
+    /// Line height remains owned by the paragraph. Non-finite or non-positive
+    /// font sizes are ignored. Explicit refinements also take precedence on
+    /// inverted surfaces.
+    pub fn with_inline_code_refinement(mut self, style: StyleRefinement) -> Self {
+        self.inline_code_refinement = normalize_inline_code_style(style);
         self
     }
 
@@ -397,9 +430,20 @@ impl TextViewStyle {
         self.link
     }
 
-    /// Whether links are underlined.
+    /// Whether links are underlined at rest.
+    pub fn is_link_underlined(&self) -> bool {
+        self.link_underline
+    }
+
+    /// Whether links are underlined at rest (the fork's older name for
+    /// [`Self::is_link_underlined`]).
     pub fn link_underline(&self) -> bool {
         self.link_underline
+    }
+
+    /// Whether links are underlined while hovered.
+    pub fn is_link_underlined_on_hover(&self) -> bool {
+        self.link_underline_on_hover
     }
 
     /// The background painted behind selected text.
@@ -515,6 +559,12 @@ impl TextViewStyle {
         self.strong_weight
     }
 
+    /// Explicit inline code typography and box refinements (upstream's
+    /// `inline_code_style`).
+    pub fn inline_code_refinement(&self) -> &StyleRefinement {
+        &self.inline_code_refinement
+    }
+
     /// Whether content-specific assets should use their dark variant.
     pub fn is_dark(&self) -> bool {
         self.is_dark
@@ -597,6 +647,18 @@ fn oklab_lightness(color: Hsla) -> f32 {
     0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s
 }
 
+/// Drop an invalid font size before it can replace an inherited value or
+/// make retained style equality fail every frame (NaN is never equal).
+pub(super) fn normalize_inline_code_style(mut style: StyleRefinement) -> StyleRefinement {
+    if style.text.font_size.is_some_and(|size| {
+        let size = size.to_pixels(gpui::px(1.)).as_f32();
+        !size.is_finite() || size <= 0.
+    }) {
+        style.text.font_size = None;
+    }
+    style
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::{Styled as _, px};
@@ -627,13 +689,46 @@ mod tests {
         assert!(base != base.clone().with_table_cell(table));
 
         assert!(base != base.clone().with_dark(true));
+        assert!(base != base.clone().with_link_underline(false));
+        assert!(base != base.clone().with_link_underline_on_hover(true));
+        assert!(
+            base != base
+                .clone()
+                .with_inline_code_refinement(StyleRefinement::default().border_color(gpui::red()))
+        );
     }
 
     #[test]
-    fn cloning_preserves_the_same_heading_callback_fingerprint() {
-        let style = TextViewStyle::default()
-            .with_heading(|_| StyleRefinement::default().text_size(px(14.)));
+    fn heading_equality_skips_shared_callbacks_and_compares_distinct_ones() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_heading = calls.clone();
+        let style = TextViewStyle::default().with_heading(move |_| {
+            calls_for_heading.fetch_add(1, Ordering::Relaxed);
+            StyleRefinement::default().text_size(px(14.))
+        });
+
         assert!(style == style.clone());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        // Ghostex fork: the fork's default gap is 1rem (it leaves out #3371), so
+        // a distinct gap is 2rem here.
+        assert!(style != style.clone().with_paragraph_gap(rems(2.)));
+        assert!(style != style.clone().with_dark(!style.is_dark()));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+        let equal = style
+            .clone()
+            .with_heading(|_| StyleRefinement::default().text_size(px(14.)));
+        assert!(style == equal);
+        assert_eq!(calls.load(Ordering::Relaxed), 6);
+
+        calls.store(0, Ordering::Relaxed);
+        let different = style.clone().with_heading(|level| {
+            StyleRefinement::default().text_size(px(if level == 6 { 28. } else { 14. }))
+        });
+        assert!(style != different);
+        assert_eq!(calls.load(Ordering::Relaxed), 6);
     }
 
     #[test]
@@ -679,6 +774,37 @@ mod tests {
         assert_eq!(
             style.inline_code_highlight().background_color,
             Some(gpui::rgb(0x123456).into())
+        );
+    }
+
+    #[test]
+    fn inline_code_refinements_remain_explicit_on_an_inverted_surface() {
+        let colors = ColorTokens::light();
+        let plain = TextViewStyle::from_colors(&colors, false);
+        assert_eq!(plain.inline_code_refinement(), &StyleRefinement::default());
+        for size in [f32::NAN, f32::INFINITY, 0., -1.] {
+            assert!(
+                plain
+                    .clone()
+                    .with_inline_code_refinement(StyleRefinement::default().text_size(px(size)))
+                    .inline_code_refinement()
+                    .text
+                    .font_size
+                    .is_none()
+            );
+        }
+        let refinement = StyleRefinement::default()
+            .text_size(gpui::rems(1.))
+            .bg(gpui::red())
+            .border_1()
+            .border_color(gpui::blue());
+        let style = plain.with_inline_code_refinement(refinement.clone());
+        assert_eq!(style.inline_code_refinement(), &refinement);
+        assert_eq!(
+            style
+                .on_text_color(colors.primary_foreground)
+                .inline_code_refinement(),
+            &refinement
         );
     }
 

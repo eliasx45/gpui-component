@@ -1,4 +1,6 @@
 mod document;
+pub mod editor_host;
+mod editor_seam;
 mod format;
 mod inline;
 mod inline_code;
@@ -35,6 +37,7 @@ pub use text_find::TextFind;
 pub use text_view::*;
 
 pub(crate) fn init(cx: &mut App) {
+    inline::init(cx);
     state::init(cx);
 }
 

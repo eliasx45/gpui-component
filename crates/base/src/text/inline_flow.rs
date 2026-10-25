@@ -10,7 +10,8 @@ use gpui::{
     AbsoluteLength, AnyElement, App, AvailableSpace, Bounds, DefiniteLength, Element, ElementId,
     GlobalElementId, Hsla, ImageSource, InspectorElementId, InteractiveElement as _, IntoElement,
     LayoutId, LineFragment as WrapLineFragment, MouseButton, ObjectFit, Pixels, Refineable as _,
-    ShapedLine, SharedString, Size, StatefulInteractiveElement as _, Styled, StyledImage as _,
+    ShapedLine, SharedString, Size, StatefulInteractiveElement as _, StyleRefinement, Styled,
+    StyledImage as _,
     TextRun, TextStyle, WhiteSpace, Window, img, point, prelude::FluentBuilder as _, px, relative,
     size,
 };
@@ -22,7 +23,7 @@ use crate::text::text_view::{
 use crate::text_selection::runs::RunSource;
 
 use super::{
-    inline::{Inline, InlineHighlight, InlineState, text_runs, text_size_ranges},
+    inline::{Inline, InlineHighlight, InlineState, code_insets, text_runs, text_size_ranges},
     inline_object::{InlineObject, MeasuredInlineObject},
     node::LinkMark,
     range_highlight::RevealAt,
@@ -44,7 +45,15 @@ pub(super) struct InlineFlow {
     /// The text leaf this flow lays out, which names its runs in the window's
     /// run selection across re-parses.
     leaf: Option<super::TextLeafKey>,
+    hover_underline: Option<gpui::UnderlineStyle>,
+    /// The block editor leaf this flow renders (design D3): its fragments
+    /// and atoms are reported to the editor sink as pieces.
+    editor_key: Option<u64>,
 }
+
+/// Bytes an image or custom inline node occupies in an editor leaf (one
+/// U+FFFC).
+const EDITOR_ATOM_LEN: usize = '\u{FFFC}'.len_utf8();
 
 pub(super) type InlineRenderer = dyn Fn(&super::InlineRenderContext, &mut Window, &mut App) -> Option<super::InlineElement>
     + Send
@@ -199,6 +208,7 @@ struct InlineFlowTypography {
 #[derive(Default)]
 struct InlineFlowLayout {
     fragments: Vec<PositionedFragment>,
+    empty_lines: Vec<(usize, Bounds<Pixels>)>,
     size: Size<Pixels>,
     wrap_width: Option<Pixels>,
 }
@@ -221,7 +231,7 @@ enum PositionedFragment {
         highlights: Vec<(Range<usize>, InlineHighlight)>,
         selection_bounds: Bounds<Pixels>,
         /// The rounded box behind a code span, relative to the flow.
-        code_background: Option<(Bounds<Pixels>, Hsla)>,
+        code_background: Option<CodeBox>,
         /// The piece of a host's chip this fragment carries, its box relative
         /// to the flow.
         chip: Option<FragmentChip>,
@@ -254,10 +264,13 @@ struct FragmentChip {
 /// A laid-out fragment ready to paint.
 pub(crate) struct PrepaintedFragment {
     element: AnyElement,
-    /// Upstream's inline-code background, in window coordinates.
-    background: Option<(Bounds<Pixels>, Hsla)>,
+    /// Upstream's inline-code box, in window coordinates.
+    background: Option<CodeBox>,
     /// A host's chip piece, its box in window coordinates.
     chip: Option<FragmentChip>,
+    /// Editor atom decorations, painted over the element so they stay
+    /// visible over opaque content.
+    overlays: Vec<(Bounds<Pixels>, Hsla)>,
 }
 
 enum MeasureItem {
@@ -296,13 +309,29 @@ enum LineFragmentKind {
         links: Vec<(Range<usize>, LinkMark)>,
         highlights: Vec<(Range<usize>, InlineHighlight)>,
         /// The code span's box, relative to the fragment.
-        code_background: Option<(Bounds<Pixels>, Hsla)>,
+        code_background: Option<CodeBox>,
         /// A host's chip piece, its box relative to the fragment.
         chip: Option<FragmentChip>,
         /// See [`PositionedFragment::Text::clamped`].
         clamped: bool,
     },
     Image,
+}
+
+/// The rounded box behind an inline code span, with its optional ring.
+#[derive(Clone, Debug)]
+struct CodeBox {
+    bounds: Bounds<Pixels>,
+    style: Arc<StyleRefinement>,
+}
+
+impl CodeBox {
+    fn offset(self, by: gpui::Point<Pixels>) -> Self {
+        Self {
+            bounds: Bounds::new(by + self.bounds.origin, self.bounds.size),
+            ..self
+        }
+    }
 }
 
 impl InlineFlow {
@@ -318,6 +347,8 @@ impl InlineFlow {
             default_cursor: false,
             link_secondary_click: None,
             leaf: None,
+            hover_underline: None,
+            editor_key: None,
         }
     }
 
@@ -340,6 +371,19 @@ impl InlineFlow {
     /// See [`TextViewStyle::default_cursor`](super::TextViewStyle::default_cursor).
     pub(super) fn default_cursor(mut self, default_cursor: bool) -> Self {
         self.default_cursor = default_cursor;
+        self
+    }
+
+    pub(super) fn hover_underline(mut self, underline: Option<gpui::UnderlineStyle>) -> Self {
+        self.hover_underline = underline;
+        self
+    }
+
+    pub(super) fn editor_key(mut self, key: Option<u64>) -> Self {
+        if let Some(key) = key {
+            self.id = ("editor-leaf", key).into();
+        }
+        self.editor_key = key;
         self
     }
 
@@ -593,6 +637,72 @@ impl Element for InlineFlow {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        // Editor leaf byte offset where each item starts: text items count
+        // their bytes, images and custom nodes one U+FFFC.
+        let editor = self
+            .editor_key
+            .and_then(|key| super::editor_seam::current().map(|sink| (key, sink)));
+        // Ordinary TextViews do not allocate editor bookkeeping.
+        let item_starts: Vec<usize> = if let Some((key, sink)) = &editor {
+            sink.begin_pieces(*key);
+            let mut at = 0;
+            self.items
+                .iter()
+                .map(|item| {
+                    let start = at;
+                    at += match item {
+                        InlineFlowItem::Text { text, .. } => text.len(),
+                        _ => EDITOR_ATOM_LEN,
+                    };
+                    start
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if let Some((key, sink)) = &editor {
+            for (start, line_bounds) in &layout.empty_lines {
+                // Flow layout uses a one-byte object placeholder; the public
+                // leaf coordinate space uses the three-byte U+FFFC instead.
+                let mut flow_start = 0;
+                let mut leaf_start = 0;
+                for item in &self.items {
+                    let len = match item {
+                        InlineFlowItem::Text { text, .. } => text.len(),
+                        _ => IMAGE_LEN,
+                    };
+                    if flow_start + len > *start {
+                        break;
+                    }
+                    flow_start += len;
+                    leaf_start += match item {
+                        InlineFlowItem::Text { text, .. } => text.len(),
+                        _ => EDITOR_ATOM_LEN,
+                    };
+                }
+                sink.report_empty_piece(
+                    *key,
+                    leaf_start + start - flow_start,
+                    Bounds::new(bounds.origin + line_bounds.origin, line_bounds.size),
+                );
+            }
+        }
+        let decorations = editor.as_ref().map(|(key, sink)| sink.backgrounds(*key));
+        let report_box = |item_ix: usize, bounds: Bounds<Pixels>| {
+            let mut overlays = Vec::new();
+            if let Some((key, sink)) = &editor {
+                let start = item_starts[item_ix];
+                let end = start + EDITOR_ATOM_LEN;
+                sink.report_box_piece(*key, start..end, bounds);
+                for (range, color) in decorations.as_deref().unwrap_or_default() {
+                    if range.start < range.end && range.start < end && range.end > start {
+                        overlays.push((bounds, *color));
+                    }
+                }
+            }
+            overlays
+        };
+
         let mut text_fragment_count = 0;
         for (fragment_ix, fragment) in layout.fragments.iter().enumerate() {
             match fragment {
@@ -614,6 +724,8 @@ impl Element for InlineFlow {
                         continue;
                     };
                     let object_size = object.metrics.size;
+                    let overlays =
+                        report_box(*item_ix, Bounds::new(bounds.origin + *origin, object_size));
                     let mut element = InlineObject::new(
                         ("inline-object", *id),
                         text.clone(),
@@ -641,6 +753,7 @@ impl Element for InlineFlow {
                         element,
                         background: None,
                         chip: None,
+                        overlays,
                     });
                 }
                 PositionedFragment::Text {
@@ -687,37 +800,29 @@ impl Element for InlineFlow {
                         state.set_text(text.clone());
                     }
 
-                    // The room around the text: a host's chip ends, or
-                    // upstream's inline-code padding on both sides.
+                    // The room around the text: a host's chip ends, or the
+                    // inline-code insets (upstream's padding and refinements;
+                    // none for a chip, see `InlineHighlight::code_insets`).
+                    let insets = code_insets(highlights, font_size, window.rem_size());
                     let (left, right) = match chip {
                         Some(chip) => (chip.left, chip.right),
-                        None => {
-                            let is_code = highlights.iter().any(|(_, h)| h.is_plain_code());
-                            let padding = if is_code {
-                                px(INLINE_CODE_PADDING)
-                            } else {
-                                Pixels::ZERO
-                            };
-                            (padding, padding)
-                        }
+                        None => (insets.left, insets.right),
                     };
                     let chip = chip.clone().map(|mut chip| {
                         chip.bounds =
                             Bounds::new(bounds.origin + chip.bounds.origin, chip.bounds.size);
                         chip
                     });
-                    let background = code_background.map(|(background, color)| {
-                        (
-                            Bounds::new(bounds.origin + background.origin, background.size),
-                            color,
-                        )
-                    });
+                    let background = code_background
+                        .as_ref()
+                        .map(|code| code.clone().offset(bounds.origin));
                     // The fragment's typography: the flow's style at the
                     // fragment's size, on one line. Fragments are already
                     // wrapped, so this leaf must not wrap independently.
                     let mut fragment_style = text_style.clone();
                     fragment_style.font_size = font_size.into();
-                    fragment_style.line_height = fragment_size.height.into();
+                    fragment_style.line_height =
+                        (fragment_size.height - insets.top - insets.bottom).into();
                     fragment_style.white_space = WhiteSpace::Nowrap;
                     if let Some(reference) = reference.as_ref().filter(|_| *clamped) {
                         fragment_style.text_overflow = Some(if reference.link.truncate_start {
@@ -741,6 +846,7 @@ impl Element for InlineFlow {
                     .atomic_selection(atomic)
                     .selection_key(source_keys[*item_ix])
                     .flow(flow_id)
+                    .hover_underline(self.hover_underline)
                     .range_backgrounds(slice_ranges(
                         backgrounds,
                         source_range.start,
@@ -754,6 +860,11 @@ impl Element for InlineFlow {
                             .map(|reveal| reveal.clamp(source_range.start, source_range.end)),
                     )
                     .text_style(fragment_style.clone())
+                    .editor_piece(
+                        editor
+                            .as_ref()
+                            .map(|(key, _)| (*key, item_starts[*item_ix] + source_range.start)),
+                    )
                     .selection_bounds(Bounds::new(
                         point(bounds.left(), bounds.top() + selection_bounds.top()),
                         size(bounds.size.width, selection_bounds.size.height),
@@ -811,12 +922,13 @@ impl Element for InlineFlow {
                             ),
                             _ => (
                                 inline
-                                    .paint_origin(
-                                        bounds.origin + origin + point(left, Pixels::ZERO),
-                                    )
+                                    .paint_origin(bounds.origin + origin + point(left, insets.top))
                                     .into_any_element(),
-                                bounds.origin + origin + point(left, Pixels::ZERO),
-                                size(fragment_size.width - left - right, fragment_size.height),
+                                bounds.origin + origin + point(left, insets.top),
+                                size(
+                                    fragment_size.width - left - right,
+                                    fragment_size.height - insets.top - insets.bottom,
+                                ),
                             ),
                         };
                     // The `Inline` is its own layout root, with no box around
@@ -842,6 +954,7 @@ impl Element for InlineFlow {
                         element,
                         background,
                         chip,
+                        overlays: Vec::new(),
                     });
                 }
                 PositionedFragment::Image {
@@ -859,6 +972,8 @@ impl Element for InlineFlow {
                         continue;
                     };
                     let (origin, fragment_size) = (*origin, *fragment_size);
+                    let overlays =
+                        report_box(*item_ix, Bounds::new(bounds.origin + origin, fragment_size));
                     let mut element = Self::image_element(
                         elements.len(),
                         source,
@@ -882,6 +997,7 @@ impl Element for InlineFlow {
                         element,
                         background: None,
                         chip: None,
+                        overlays,
                     });
                 }
             }
@@ -918,8 +1034,16 @@ impl Element for InlineFlow {
         }
         let radius = crate::Theme::global(cx).tokens.radius.sm;
         for fragment in prepaint {
-            if let Some((bounds, color)) = fragment.background {
-                window.paint_quad(gpui::fill(bounds, color).corner_radii(radius));
+            if let Some(code) = &fragment.background {
+                let mut style = gpui::Style::default();
+                style.corner_radii = gpui::Corners {
+                    top_left: radius.into(),
+                    top_right: radius.into(),
+                    bottom_left: radius.into(),
+                    bottom_right: radius.into(),
+                };
+                style.refine(&code.style);
+                style.paint(code.bounds, window, cx, |_, _| {});
             }
             if let Some(chip) = &fragment.chip {
                 super::inline_code::paint_chip(
@@ -932,6 +1056,9 @@ impl Element for InlineFlow {
                 );
             }
             fragment.element.paint(window, cx);
+            for (bounds, color) in &fragment.overlays {
+                window.paint_quad(gpui::fill(*bounds, *color));
+            }
         }
     }
 }
@@ -1147,6 +1274,7 @@ fn layout_measured_flow(
     let line_ranges = line_ranges(items, image_sizes, &objects, text_style, wrap_width, window);
     let font_size = text_style.font_size.to_pixels(rem_size);
     let mut fragments = Vec::new();
+    let mut empty_lines = Vec::new();
     let mut max_width = Pixels::ZERO;
     let mut y = Pixels::ZERO;
 
@@ -1229,7 +1357,9 @@ fn layout_measured_flow(
                     let local_start = line_range.start.max(item_start) - item_start;
                     let local_end = line_range.end.min(item_end) - item_start;
                     let chip_spans = chip_spans(highlights);
-                    for (segment, scale, chip) in flow_segments(text.len(), highlights) {
+                    for (segment, scale, chip) in
+                        flow_segments(text.len(), highlights, font_size, window.rem_size())
+                    {
                         let start = local_start.max(segment.start);
                         let end = local_end.min(segment.end);
                         if start >= end {
@@ -1248,11 +1378,7 @@ fn layout_measured_flow(
                             shape_line(subtext.clone(), segment_font_size, &runs, window);
                         let is_code =
                             chip.is_none() && highlights.iter().any(|(_, h)| h.is_plain_code());
-                        let padding = if is_code {
-                            px(INLINE_CODE_PADDING * 2.)
-                        } else {
-                            Pixels::ZERO
-                        };
+                        let insets = code_insets(&highlights, segment_font_size, window.rem_size());
                         // A host's chip pads only the span's two ends, so a
                         // span broken across lines reads as one chip.
                         let chip = chip.map(|chip| {
@@ -1279,7 +1405,8 @@ fn layout_measured_flow(
                             }
                         });
                         let width = shaped_line.width()
-                            + padding
+                            + insets.left
+                            + insets.right
                             + chip
                                 .as_ref()
                                 .map_or(Pixels::ZERO, |chip| chip.left + chip.right);
@@ -1290,8 +1417,11 @@ fn layout_measured_flow(
                         // its line taller than a plain one. Positioning grows the
                         // box back to the line. The compact code background is
                         // painted independently.
-                        let glyph_size = size(width, shaped_line.ascent + shaped_line.descent);
-                        let baseline = shaped_line.ascent;
+                        let glyph_size = size(
+                            width,
+                            shaped_line.ascent + shaped_line.descent + insets.top + insets.bottom,
+                        );
+                        let baseline = shaped_line.ascent + insets.top;
                         let chip = chip.map(|mut chip| {
                             chip.bounds = super::inline_code::chip_box(
                                 &chip.style,
@@ -1374,6 +1504,15 @@ fn layout_measured_flow(
             item_start = item_end;
         }
 
+        if line_range.is_empty() {
+            empty_lines.push((
+                line_range.start,
+                Bounds::new(
+                    point(Pixels::ZERO, y),
+                    size(Pixels::ZERO, line_ascent + line_descent),
+                ),
+            ));
+        }
         let mut x = Pixels::ZERO;
         for mut fragment in line_fragments {
             // Give a text run's glyph box equal leading on both sides, as
@@ -1420,15 +1559,8 @@ fn layout_measured_flow(
                     text,
                     links,
                     highlights,
-                    code_background: code_background.map(|(background, color)| {
-                        (
-                            Bounds::new(
-                                origin + point(Pixels::ZERO, leading) + background.origin,
-                                background.size,
-                            ),
-                            color,
-                        )
-                    }),
+                    code_background: code_background
+                        .map(|code| code.offset(origin + point(Pixels::ZERO, leading))),
                     chip: chip.map(|mut chip| {
                         chip.bounds = Bounds::new(
                             origin + point(Pixels::ZERO, leading) + chip.bounds.origin,
@@ -1453,6 +1585,7 @@ fn layout_measured_flow(
 
     InlineFlowLayout {
         fragments,
+        empty_lines,
         size: size(max_width, y),
         wrap_width,
     }
@@ -1464,6 +1597,8 @@ fn layout_measured_flow(
 fn flow_segments(
     text_len: usize,
     highlights: &[(Range<usize>, InlineHighlight)],
+    font_size: Pixels,
+    rem_size: Pixels,
 ) -> Vec<(Range<usize>, f32, Option<Arc<super::InlineCodeStyle>>)> {
     fn same_chip(
         left: &Option<Arc<super::InlineCodeStyle>>,
@@ -1475,33 +1610,42 @@ fn flow_segments(
             _ => false,
         }
     }
-    let mut segments: Vec<(Range<usize>, f32, Option<Arc<super::InlineCodeStyle>>)> = Vec::new();
-    let mut push = |range: Range<usize>, scale: f32, chip: Option<Arc<super::InlineCodeStyle>>| {
-        if range.is_empty() {
-            return;
-        }
-        if let Some((last, last_scale, last_chip)) = segments.last_mut()
-            && *last_scale == scale
-            && same_chip(last_chip, &chip)
-            && last.end == range.start
-        {
-            last.end = range.end;
-        } else {
-            segments.push((range, scale, chip));
-        }
-    };
+    // Like upstream's `text_size_ranges`, code stays a segment of its own
+    // even at the prose's size, so its box is measured and painted alone.
+    let mut segments: Vec<(Range<usize>, f32, Option<Arc<super::InlineCodeStyle>>, bool)> =
+        Vec::new();
+    let mut push =
+        |range: Range<usize>, scale: f32, chip: Option<Arc<super::InlineCodeStyle>>, code: bool| {
+            if range.is_empty() {
+                return;
+            }
+            if let Some((last, last_scale, last_chip, last_code)) = segments.last_mut()
+                && *last_scale == scale
+                && same_chip(last_chip, &chip)
+                && *last_code == code
+                && last.end == range.start
+            {
+                last.end = range.end;
+            } else {
+                segments.push((range, scale, chip, code));
+            }
+        };
     let mut cursor = 0;
     for (range, highlight) in highlights {
-        push(cursor..range.start, 1., None);
+        push(cursor..range.start, 1., None, false);
         push(
             range.clone(),
-            highlight.font_size_scale.unwrap_or(1.),
+            highlight.font_size(font_size, rem_size) / font_size,
             highlight.chip.clone(),
+            highlight.font_size_scale.is_some(),
         );
         cursor = range.end;
     }
-    push(cursor..text_len, 1., None);
+    push(cursor..text_len, 1., None, false);
     segments
+        .into_iter()
+        .map(|(range, scale, chip, _)| (range, scale, chip))
+        .collect()
 }
 
 /// Every host chip span in an item: the highlights sharing one chip,
@@ -1537,7 +1681,7 @@ fn code_background(
     fragment_size: Size<Pixels>,
     baseline: Pixels,
     window: &Window,
-) -> Option<(Bounds<Pixels>, Hsla)> {
+) -> Option<CodeBox> {
     let cap_height = runs
         .iter()
         .map(|run| {
@@ -1549,17 +1693,43 @@ fn code_background(
     let color = highlights
         .iter()
         .find_map(|(_, h)| h.style.background_color);
+    let mut style = highlights
+        .iter()
+        .find_map(|(_, h)| h.code_style.clone())
+        .unwrap_or_default();
+    if style.background.is_none() {
+        style.background = color.map(Into::into);
+    }
     for (_, highlight) in highlights.iter_mut() {
         highlight.style.background_color = None;
     }
-    color.map(|color| {
-        (
-            Bounds::new(
-                point(Pixels::ZERO, baseline - cap_height - vertical_padding),
-                size(fragment_size.width, cap_height + vertical_padding * 2.),
-            ),
-            color,
-        )
+    let insets = code_insets(highlights, font_size, window.rem_size());
+    let top = if style.padding.top.is_some() {
+        shaped_line.ascent - cap_height + insets.top
+    } else {
+        vertical_padding
+            + style
+                .border_widths
+                .top
+                .map(|width| width.to_pixels(window.rem_size()))
+                .unwrap_or_default()
+    };
+    let bottom = if style.padding.bottom.is_some() {
+        shaped_line.descent + insets.bottom
+    } else {
+        vertical_padding
+            + style
+                .border_widths
+                .bottom
+                .map(|width| width.to_pixels(window.rem_size()))
+                .unwrap_or_default()
+    };
+    Some(CodeBox {
+        bounds: Bounds::new(
+            point(Pixels::ZERO, baseline - cap_height - top),
+            size(fragment_size.width, cap_height + top + bottom),
+        ),
+        style: Arc::new(style),
     })
 }
 
@@ -1599,6 +1769,10 @@ fn line_ranges(
     let mut ranges = Vec::new();
 
     for hard_line in hard_lines {
+        if hard_line.is_empty() {
+            ranges.push(hard_line);
+            continue;
+        }
         let mut item_start = 0;
         let mut wrap_fragments = Vec::new();
         for (ix, item) in items.iter().enumerate() {
@@ -1692,6 +1866,12 @@ fn line_ranges(
                     step = step * 2.;
                 }
             }
+            // The wrapper can also break a rest that fits: kerning makes a
+            // shaped run narrower than its summed characters. A table column
+            // sized to its measured text would drop its last character.
+            if end < hard_line.end && spans_width(&spans, start..hard_line.end) <= wrap_width {
+                end = hard_line.end;
+            }
             ranges.push(start..end);
             start = end;
         }
@@ -1783,7 +1963,9 @@ fn shaped_spans(
                 } => {
                     let local_start = hard_line.start.max(item_start) - item_start;
                     let local_end = hard_line.end.min(item_end) - item_start;
-                    for (segment, scale) in text_size_ranges(text.len(), highlights) {
+                    for (segment, scale) in
+                        text_size_ranges(text.len(), highlights, font_size, window.rem_size())
+                    {
                         let start = local_start.max(segment.start);
                         let end = local_end.min(segment.end);
                         if start >= end {
@@ -1799,12 +1981,8 @@ fn shaped_spans(
                             &runs,
                             window,
                         ));
-                        let padding = if highlights.iter().any(|(_, h)| h.font_size_scale.is_some())
-                        {
-                            px(INLINE_CODE_PADDING * 2.)
-                        } else {
-                            Pixels::ZERO
-                        };
+                        let insets = code_insets(&highlights, font_size * scale, window.rem_size());
+                        let padding = insets.left + insets.right;
                         spans.push(ShapedSpan::Text {
                             range: item_start + start..item_start + end,
                             line,
@@ -1971,6 +2149,8 @@ fn push_text_wrap_fragments<'a>(
             fragments.push(WrapLineFragment::text(&text[cursor..start]));
         }
         let span = &text[start..end];
+        let rem_size = window.rem_size();
+        let measured_font_size = highlight.font_size(font_size, rem_size);
         let measure = |text: &str| {
             let runs = text_runs(
                 text.len(),
@@ -1979,19 +2159,11 @@ fn push_text_wrap_fragments<'a>(
             );
             window
                 .text_system()
-                .layout_line(
-                    text,
-                    font_size * highlight.font_size_scale.unwrap_or(1.),
-                    &runs,
-                    None,
-                )
+                .layout_line(text, measured_font_size, &runs, None)
                 .width
         };
-        let padding = if highlight.font_size_scale.is_some() {
-            px(INLINE_CODE_PADDING * 2.)
-        } else {
-            Pixels::ZERO
-        };
+        let insets = highlight.code_insets(measured_font_size, rem_size);
+        let padding = insets.left + insets.right;
         let width = measure(span) + padding;
         if width <= wrap_width {
             fragments.push(WrapLineFragment::element(width, span.len()));
@@ -2221,7 +2393,10 @@ mod tests {
             draw(cx);
             let before = layouts();
 
-            answer.update(cx, |answer, _| answer.width = px(120.));
+            answer.update(cx, |answer, cx| {
+                answer.width = px(120.);
+                cx.notify();
+            });
             draw(cx);
 
             assert!(layouts() > before, "a narrower flow wraps differently");
@@ -2369,6 +2544,7 @@ mod tests {
             font_family: Some(SharedString::from(MONO)),
             font_size_scale: None,
             chip: None,
+            code_style: None,
         };
         let items = vec![
             MeasureItem::Text {
@@ -2539,6 +2715,100 @@ mod tests {
             let layout = layout_flow(&items, &[None], &style, None, window, cx);
             assert_eq!(layout.size.height, window.pixel_snap(px(30.)));
         });
+    }
+
+    #[test]
+    fn inline_code_style_keeps_equal_size_prose_separate_and_measures_its_box() {
+        use super::super::inline::test_fonts::{BODY, MONO, WideMonoTextSystem};
+        use gpui::{Empty, HighlightStyle, TestApp, rems};
+        let mut app = TestApp::with_text_system(Arc::new(WideMonoTextSystem));
+        let mut window = app.open_window(|_, _| Empty);
+        for rem_size in [px(14.), px(28.)] {
+            window.update(|_, window, cx| {
+                window.set_rem_size(rem_size);
+                let text_style = TextStyle {
+                    font_family: BODY.into(),
+                    font_size: rem_size.into(),
+                    ..Default::default()
+                };
+                let code_style = StyleRefinement::default()
+                    .text_size(rems(1.))
+                    .px(rems(0.25))
+                    .py(rems(0.125))
+                    .bg(gpui::red())
+                    .border_1()
+                    .border_color(gpui::blue())
+                    .rounded(rems(0.25));
+                let highlight = InlineHighlight {
+                    font_family: Some(MONO.into()),
+                    font_size_scale: Some(0.875),
+                    code_style: Some(code_style.clone()),
+                    chip: None,
+                    style: HighlightStyle {
+                        background_color: Some(gpui::green()),
+                        ..Default::default()
+                    },
+                };
+                let items = vec![MeasureItem::Text {
+                    text: "before code after".into(),
+                    links: vec![],
+                    highlights: vec![(7..11, highlight)],
+                    reference: None,
+                }];
+                let layout = layout_flow(&items, &[None], &text_style, None, window, cx);
+                assert_eq!(layout.fragments.len(), 3);
+                for fragment in &layout.fragments {
+                    let PositionedFragment::Text {
+                        text,
+                        size,
+                        font_size,
+                        code_background,
+                        ..
+                    } = fragment
+                    else {
+                        panic!("expected text");
+                    };
+                    assert_eq!(*font_size, rem_size);
+                    if text.as_ref() == "code" {
+                        let code = code_background.as_ref().expect("code box");
+                        assert_eq!(code.style.background, code_style.background);
+                        assert_eq!(code.style.border_color, Some(gpui::blue()));
+                        assert_eq!(code.style.corner_radii, code_style.corner_radii);
+                        assert_eq!(code.bounds.size.width, size.width);
+                        assert_eq!(
+                            size.width,
+                            WideMonoTextSystem::width_of("code", MONO, rem_size)
+                                + rem_size * 0.5
+                                + px(2.)
+                        );
+                    } else {
+                        assert!(code_background.is_none());
+                        assert_eq!(
+                            size.width,
+                            WideMonoTextSystem::width_of(text, BODY, rem_size)
+                        );
+                    }
+                }
+                // The same insets must be included by wrapping, not just drawing.
+                let wrap_width = WideMonoTextSystem::width_of("before ", BODY, rem_size)
+                    + WideMonoTextSystem::width_of("code", MONO, rem_size)
+                    + rem_size * 0.5
+                    + px(1.);
+                let wrapped =
+                    layout_flow(&items, &[None], &text_style, Some(wrap_width), window, cx);
+                assert!(wrapped.size.height > layout.size.height);
+                assert!(wrapped.size.width <= wrap_width);
+                let reconstructed = wrapped
+                    .fragments
+                    .iter()
+                    .filter_map(|fragment| match fragment {
+                        PositionedFragment::Text { text, .. } => Some(text.as_ref()),
+                        _ => None,
+                    })
+                    .collect::<String>();
+                assert_eq!(reconstructed, "before code after");
+            });
+        }
     }
 
     #[test]

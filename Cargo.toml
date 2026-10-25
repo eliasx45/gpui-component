@@ -17,6 +17,7 @@ members = [
     "examples/hello_world",
     "examples/input",
     "examples/editor",
+    "examples/syntect",
     "examples/tig",
     "examples/brush",
     "examples/dock",
@@ -40,7 +41,6 @@ members = [
     "examples/speech",
     "crates/shell",
     "crates/shell/rquickjs-compat",
-    "crates/component-shell",
 ]
 resolver = "2"
 
@@ -49,15 +49,14 @@ publish = false
 edition = "2024"
 
 [workspace.dependencies]
-gpui-kit = { path = "crates/kit", version = "0.7.1" }
-gpui-component = { path = "crates/component", version = "0.7.1" }
-gpui-base = { path = "crates/base", version = "0.7.1" }
-gpui-component-macros = { path = "crates/component-macros", version = "0.7.1" }
-gpui-kit-assets = { path = "crates/assets", version = "0.7.1" }
-gpui-fps = { path = "crates/fps", version = "0.7.1" }
-gpui-shell = { path = "crates/shell", version = "0.7.1" }
-gpui-wry = { path = "crates/webview", version = "0.7.1" }
-gpui-component-shell = { path = "crates/component-shell", version = "0.7.1" }
+gpui-kit = { path = "crates/kit", version = "0.8.0" }
+gpui-component = { path = "crates/component", version = "0.8.0" }
+gpui-base = { path = "crates/base", version = "0.8.0" }
+gpui-component-macros = { path = "crates/component-macros", version = "0.8.0" }
+gpui-kit-assets = { path = "crates/assets", version = "0.8.0" }
+gpui-fps = { path = "crates/fps", version = "0.8.0" }
+gpui-shell = { path = "crates/shell", version = "0.8.0" }
+gpui-webview = { path = "crates/webview", version = "0.8.0" }
 story = { path = "crates/story" }
 
 # Ghostex fork: GPUI comes from Zed's git repository instead of the `gpui-pre-*`
@@ -74,9 +73,9 @@ reqwest_client = { git = "https://github.com/zed-industries/zed" }
 sum-tree = { git = "https://github.com/zed-industries/zed", package = "sum_tree" }
 # GPUI Fast is optional and unused by the Ghostex fork (a host patches `gpui` itself);
 # the crates' `gpui-fast` features still name these, so they stay declared.
-gpui-fast = { package = "gpui-fast", version = "0.1.1", features = ["windows-manifest-provided-by-host"] }
-gpui-fast-platform = { package = "gpui-fast-platform", version = "0.1.1", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-gpui-fast-web = { package = "gpui-fast-web", version = "0.1.1" }
+gpui-fast = { package = "gpui-fast", version = "0.1.10", features = ["windows-manifest-provided-by-host"] }
+gpui-fast-platform = { package = "gpui-fast-platform", version = "0.1.10", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui-fast-web = { package = "gpui-fast-web", version = "0.1.10" }
 reqwest = { package = "gpui-pre-reqwest", version = "=0.12.15", default-features = false, features = [
     "charset",
     "http2",
@@ -111,6 +110,7 @@ syntect = { version = "5.3.0", default-features = false, features = [
     "default-syntaxes",
     "regex-fancy",
 ] }
+two-face = { version = "0.4.5", default-features = false, features = ["syntect-fancy"] }
 tracing = "0.1.41"
 wasm-bindgen = "0.2.113"
 # Use errno stub for WASM
@@ -139,11 +139,18 @@ type_complexity = "allow"
 # https://github.com/longbridge/gpui-kit/pull/2149
 useless_conversion = "allow"
 
+# Keep Cargo's default of 256 codegen units. Incremental builds re-codegen
+# whole units, so with 16 units a one-line change in gpui-component or
+# gpui-base took about 50% more CPU to rebuild.
 [profile.dev]
-codegen-units = 16
 debug = "limited"
 split-debuginfo = "unpacked"
 
+# These speed up the debug application at run time; opt-level 1 rendered the
+# `text_view_scroll` bench frames 22-25% slower to save about 9% of a clean
+# build's CPU, and nothing on an incremental one. Proc-macro crates are left
+# out: they only run inside the compiler, and expanding gpui's macros takes as
+# long unoptimized, so optimizing them only adds compile time.
 [profile.dev.package]
 resvg = { opt-level = 3 }
 rustybuzz = { opt-level = 3 }
@@ -155,7 +162,6 @@ gpui_platform = { opt-level = 3 }
 gpui_macros = { opt-level = 3 }
 gpui-fast = { opt-level = 3 }
 gpui-fast-platform = { opt-level = 3 }
-gpui-fast-macros = { opt-level = 3 }
 tree-sitter = { opt-level = 3 }
 sum_tree = { opt-level = 3 }
 ropey = { opt-level = 3 }
@@ -173,6 +179,11 @@ quickjs-jit-runtime = { opt-level = 3 }
 quickjs-jit-sys = { opt-level = 3 }
 quickjs-jit-core = { opt-level = 3 }
 cap-std = { opt-level = 3 }
+
+# Stripping the symbol table costs no build time and removes about a quarter of
+# a release binary (`gpui-shell`: 106 MB to 78 MB on Linux x86_64).
+[profile.release]
+strip = "symbols"
 
 [patch.crates-io]
 # LLRT's public modules still name their compatible binding dependency
