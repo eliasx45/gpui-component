@@ -114,6 +114,18 @@ pub struct TextViewStyle {
     pub link: Option<Hsla>,
     /// Whether links are underlined. Default `true`.
     pub link_underline: bool,
+    /// Ghostex fork: underline a link only while the pointer is on it.
+    /// Default `false`.
+    pub link_underline_on_hover: bool,
+    /// Ghostex fork: refines a blockquote's box over the default border-left.
+    pub blockquote: StyleRefinement,
+    /// Ghostex fork: refines a thematic break over the default 2 px bar.
+    pub horizontal_rule: StyleRefinement,
+    /// Ghostex fork: fit a fenced block to its code, at least this wide.
+    /// `None` keeps full width.
+    pub code_block_fit_content: Option<Pixels>,
+    /// Ghostex fork: the look of a fenced block's own scrollbars.
+    pub code_block_scrollbar: Option<gpui_base::text::CodeBlockScrollbar>,
     /// Whether content-specific rendering should use dark-mode assets.
     pub is_dark: bool,
 }
@@ -146,6 +158,11 @@ impl Default for TextViewStyle {
             strong_weight: FontWeight::BOLD,
             link: None,
             link_underline: true,
+            link_underline_on_hover: false,
+            blockquote: StyleRefinement::default(),
+            horizontal_rule: StyleRefinement::default(),
+            code_block_fit_content: None,
+            code_block_scrollbar: None,
             is_dark: false,
         }
     }
@@ -185,6 +202,11 @@ impl PartialEq for TextViewStyle {
             && self.strong_weight == other.strong_weight
             && self.link == other.link
             && self.link_underline == other.link_underline
+            && self.link_underline_on_hover == other.link_underline_on_hover
+            && self.blockquote == other.blockquote
+            && self.horizontal_rule == other.horizontal_rule
+            && self.code_block_fit_content == other.code_block_fit_content
+            && self.code_block_scrollbar == other.code_block_scrollbar
             && self.is_dark == other.is_dark
     }
 }

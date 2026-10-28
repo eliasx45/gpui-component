@@ -440,6 +440,12 @@ pub(super) fn resolve_component_style(
         // Ghostex fork: the strong weight passes straight through.
         .with_strong_weight(legacy.strong_weight)
         .with_link_underline(legacy.link_underline)
+        // Ghostex fork (2026-10-28): the Claude look's hooks pass straight through.
+        .with_link_underline_on_hover(legacy.link_underline_on_hover)
+        .with_blockquote(legacy.blockquote.clone())
+        .with_horizontal_rule(legacy.horizontal_rule.clone())
+        .with_code_block_fit_content(legacy.code_block_fit_content)
+        .with_code_block_scrollbar(legacy.code_block_scrollbar)
         .with_dark(is_dark);
     match legacy.link {
         Some(link) => style.with_link(link),

@@ -2221,9 +2221,17 @@ impl CodeBlock {
             body.whitespace_nowrap().min_w_full().w(width).child(code)
         };
 
+        // Ghostex fork: a host may fit the block to its code
+        // (`with_code_block_fit_content`): as wide as its widest line, never
+        // wider than the view, never narrower than the minimum (or the view).
+        let fit = style.code_block_fit_content();
         let block = div()
-            .w_full()
+            .when(fit.is_none(), |this| this.w_full())
+            .when_some(fit, |this, min_width| this.max_w_full().min_w(min_width))
             .min_w_0()
+            // Ghostex fork: hosts reveal their actions on hover with
+            // `group_hover(CODE_BLOCK_GROUP, …)`; the innermost block wins.
+            .group(CODE_BLOCK_GROUP)
             .when(actions.is_none(), |this| this.p_3())
             .bg(style.code_background())
             .font_family(mono_font)
@@ -2277,6 +2285,7 @@ impl CodeBlock {
                     Some(thickness) => scrollbar.thickness(thickness),
                     None => scrollbar,
                 };
+                let scrollbar = code_block_scrollbar(scrollbar, style.code_block_scrollbar());
                 div()
                     .w_full()
                     .relative()
@@ -2324,6 +2333,36 @@ impl CodeBlock {
             },
         )
     }
+}
+
+/// Ghostex fork: the group every fenced block carries, for hosts that reveal
+/// their code block actions on hover.
+pub const CODE_BLOCK_GROUP: &str = "gpui-text-code-block";
+
+/// Ghostex fork: a fenced block's scrollbar in the host's look, if it set one.
+fn code_block_scrollbar(
+    scrollbar: Scrollbar,
+    look: Option<super::style::CodeBlockScrollbar>,
+) -> Scrollbar {
+    let Some(look) = look else {
+        return scrollbar;
+    };
+    scrollbar.thickness(look.thickness).styles(|styles| {
+        styles
+            .track(|track| track.bg(look.track))
+            .thumb(|thumb| {
+                thumb
+                    .bg(look.thumb)
+                    .inset(look.inset)
+                    .radius(look.thickness)
+            })
+            .thumb_hover(|thumb| {
+                thumb
+                    .bg(look.thumb_hover)
+                    .inset(look.inset)
+                    .radius(look.thickness)
+            })
+    })
 }
 
 /// `p_3` on both sides of an unwrapped block's body.
@@ -4213,6 +4252,8 @@ impl BlockNode {
                     .border_l_3()
                     .border_color(node_cx.style.border())
                     .px_4()
+                    // Ghostex fork: a host's blockquote look (`with_blockquote`).
+                    .refine_style(node_cx.style.blockquote())
                     .children({
                         let children_len = children.len();
                         children.into_iter().enumerate().map(move |(index, c)| {
@@ -4285,6 +4326,8 @@ impl BlockNode {
                 div()
                     .bg(node_cx.style.border())
                     .h(px(2.))
+                    // Ghostex fork: a host's rule look (`with_horizontal_rule`).
+                    .refine_style(node_cx.style.horizontal_rule())
                     .into_any_element(),
                 mb,
             ),

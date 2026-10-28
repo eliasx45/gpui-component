@@ -77,6 +77,25 @@ pub struct TextViewStyle {
     /// show that surface.
     table_background: Option<Hsla>,
     is_dark: bool,
+    // Ghostex fork (2026-10-28, Claude look): see the `with_*` methods of the same name.
+    blockquote: StyleRefinement,
+    horizontal_rule: StyleRefinement,
+    link_underline_on_hover: bool,
+    code_block_fit_content: Option<Pixels>,
+    code_block_scrollbar: Option<CodeBlockScrollbar>,
+}
+
+/// Ghostex fork: the look of a fenced block's own scrollbars (its height cap
+/// and its sideways scroll), so a host can draw them unlike the page's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CodeBlockScrollbar {
+    /// Track thickness.
+    pub thickness: Pixels,
+    /// The thumb's inset from the track edges.
+    pub inset: Pixels,
+    pub thumb: Hsla,
+    pub thumb_hover: Hsla,
+    pub track: Hsla,
 }
 
 impl PartialEq for TextViewStyle {
@@ -109,6 +128,11 @@ impl PartialEq for TextViewStyle {
             && self.strong_weight == other.strong_weight
             && self.table_background == other.table_background
             && self.is_dark == other.is_dark
+            && self.blockquote == other.blockquote
+            && self.horizontal_rule == other.horizontal_rule
+            && self.link_underline_on_hover == other.link_underline_on_hover
+            && self.code_block_fit_content == other.code_block_fit_content
+            && self.code_block_scrollbar == other.code_block_scrollbar
     }
 }
 
@@ -165,6 +189,11 @@ impl TextViewStyle {
             strong_weight: FontWeight::BOLD,
             table_background: None,
             is_dark,
+            blockquote: StyleRefinement::default(),
+            horizontal_rule: StyleRefinement::default(),
+            link_underline_on_hover: false,
+            code_block_fit_content: None,
+            code_block_scrollbar: None,
         }
     }
 
@@ -189,6 +218,42 @@ impl TextViewStyle {
     /// Sets whether links are underlined (default `true`).
     pub fn with_link_underline(mut self, underline: bool) -> Self {
         self.link_underline = underline;
+        self
+    }
+
+    /// Ghostex fork: refines a blockquote's box (border, padding, colour) over
+    /// the default 3 px border-left in the border colour, muted text, `px_4`.
+    pub fn with_blockquote(mut self, style: StyleRefinement) -> Self {
+        self.blockquote = style;
+        self
+    }
+
+    /// Ghostex fork: refines a thematic break (`---`) over the default 2 px
+    /// bar in the border colour.
+    pub fn with_horizontal_rule(mut self, style: StyleRefinement) -> Self {
+        self.horizontal_rule = style;
+        self
+    }
+
+    /// Ghostex fork: underline a link only while the pointer is on it (with
+    /// [`Self::with_link_underline`] off). Default `false`.
+    pub fn with_link_underline_on_hover(mut self, underline: bool) -> Self {
+        self.link_underline_on_hover = underline;
+        self
+    }
+
+    /// Ghostex fork: a fenced block as wide as its code (never wider than the
+    /// view) and at least `min_width`, instead of always full width. `None`
+    /// (default) keeps full width.
+    pub fn with_code_block_fit_content(mut self, min_width: Option<Pixels>) -> Self {
+        self.code_block_fit_content = min_width;
+        self
+    }
+
+    /// Ghostex fork: the look of a fenced block's own scrollbars. `None`
+    /// (default) keeps the table scrollbar thickness and the theme colours.
+    pub fn with_code_block_scrollbar(mut self, look: Option<CodeBlockScrollbar>) -> Self {
+        self.code_block_scrollbar = look;
         self
     }
 
@@ -400,6 +465,31 @@ impl TextViewStyle {
     /// Whether links are underlined.
     pub fn link_underline(&self) -> bool {
         self.link_underline
+    }
+
+    /// Ghostex fork: the blockquote refinement.
+    pub fn blockquote(&self) -> &StyleRefinement {
+        &self.blockquote
+    }
+
+    /// Ghostex fork: the thematic break refinement.
+    pub fn horizontal_rule(&self) -> &StyleRefinement {
+        &self.horizontal_rule
+    }
+
+    /// Ghostex fork: whether a link is underlined while hovered.
+    pub fn link_underline_on_hover(&self) -> bool {
+        self.link_underline_on_hover
+    }
+
+    /// Ghostex fork: a fenced block's minimum width when it fits its code.
+    pub fn code_block_fit_content(&self) -> Option<Pixels> {
+        self.code_block_fit_content
+    }
+
+    /// Ghostex fork: the look of a fenced block's own scrollbars.
+    pub fn code_block_scrollbar(&self) -> Option<CodeBlockScrollbar> {
+        self.code_block_scrollbar
     }
 
     /// The background painted behind selected text.

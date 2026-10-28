@@ -838,7 +838,41 @@ impl Element for Inline {
             .text_style
             .clone()
             .unwrap_or_else(|| window.text_style());
-        let runs = text_runs(self.text.len(), &text_style, &self.highlights);
+        // Ghostex fork: `TextViewStyle::with_link_underline_on_hover` underlines
+        // the link under the pointer only (the mouse-move listener below
+        // repaints when the pointer enters or leaves one).
+        let hovered_link = self
+            .state
+            .lock()
+            .ok()
+            .and_then(|state| state.hovered_index)
+            .filter(|_| {
+                GlobalState::global(cx)
+                    .text_view_state()
+                    .is_some_and(|state| state.read(cx).text_view_style.link_underline_on_hover())
+            })
+            .and_then(|index| self.links.get(index))
+            .map(|(range, _)| range.clone());
+        let runs = match hovered_link {
+            Some(range) => text_runs(
+                self.text.len(),
+                &text_style,
+                &combine_highlights(
+                    self.highlights.clone(),
+                    [(
+                        range,
+                        InlineHighlight::from(HighlightStyle {
+                            underline: Some(gpui::UnderlineStyle {
+                                thickness: gpui::px(1.),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                    )],
+                ),
+            ),
+            None => text_runs(self.text.len(), &text_style, &self.highlights),
+        };
 
         // Reuse the previous frame's shaped text when it was shaped from the
         // same text, runs and style; `StyledText` consumes its runs on every

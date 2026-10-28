@@ -9,7 +9,7 @@ pub use compat::{
 };
 pub use frontmatter::FrontmatterPlugin;
 pub use gpui_base::text::{
-    CodeBlock, InlineCodeStyle, InlineElement, InlineLink, InlineLinkAction, InlineLinkBar,
+    CODE_BLOCK_GROUP, CodeBlock, CodeBlockScrollbar, InlineCodeStyle, InlineElement, InlineLink, InlineLinkAction, InlineLinkBar,
     InlineLinkFrame, InlineRenderContext, MarkdownBlockParserFn, MarkdownBlockRenderFn,
     MarkdownExtensions, MarkdownNode, MarkdownParseContext, MarkdownPlugin, RangeHighlight,
     RangeHighlightError, RenderedText, SelectionFormat, TableData, TextFind, TextViewMotion,

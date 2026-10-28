@@ -25,7 +25,7 @@ pub(crate) use inline::InlineState;
 pub use inline_element::*;
 pub use inline_link::{InlineLink, InlineLinkAction, InlineLinkBar, InlineLinkFrame};
 pub use markdown_ext::*;
-pub use node::{CodeBlock, TableData};
+pub use node::{CODE_BLOCK_GROUP, CodeBlock, TableData};
 pub use range_highlight::{RangeHighlight, RangeHighlightError, RenderedText};
 pub use state::*;
 pub(crate) use stream_fade::TextLeafKey;
