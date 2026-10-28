@@ -2189,7 +2189,9 @@ impl CodeBlock {
 
         // With host actions the padding moves inside, so the header they draw
         // can span the block's full width and rule off from edge to edge.
-        let body = div().when(actions.is_some(), |this| this.p_3());
+        // Ghostex fork: a host's fence padding (`with_code_block_padding`), default `p_3`.
+        let pad = style.code_block_padding().unwrap_or(px(CODE_PAD_PX / 2.0));
+        let body = div().when(actions.is_some(), |this| this.p(pad));
         let body = if wrap {
             body.child(code)
         } else {
@@ -2214,7 +2216,7 @@ impl CodeBlock {
                 .layout_line(widest, mono_size, &[text_style.to_run(widest.len())], None)
                 .width
                 + if actions.is_some() {
-                    px(CODE_PAD_PX)
+                    pad * 2.0
                 } else {
                     Pixels::ZERO
                 };
@@ -2232,7 +2234,7 @@ impl CodeBlock {
             // Ghostex fork: hosts reveal their actions on hover with
             // `group_hover(CODE_BLOCK_GROUP, …)`; the innermost block wins.
             .group(CODE_BLOCK_GROUP)
-            .when(actions.is_none(), |this| this.p_3())
+            .when(actions.is_none(), |this| this.p(pad))
             .bg(style.code_background())
             .font_family(mono_font)
             .text_size(mono_size)

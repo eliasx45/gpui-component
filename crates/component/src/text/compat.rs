@@ -446,6 +446,7 @@ pub(super) fn resolve_component_style(
         .with_horizontal_rule(legacy.horizontal_rule.clone())
         .with_code_block_fit_content(legacy.code_block_fit_content)
         .with_code_block_scrollbar(legacy.code_block_scrollbar)
+        .with_code_block_padding(legacy.code_block_padding)
         .with_dark(is_dark);
     match legacy.link {
         Some(link) => style.with_link(link),

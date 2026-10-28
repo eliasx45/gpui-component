@@ -83,6 +83,7 @@ pub struct TextViewStyle {
     link_underline_on_hover: bool,
     code_block_fit_content: Option<Pixels>,
     code_block_scrollbar: Option<CodeBlockScrollbar>,
+    code_block_padding: Option<Pixels>,
 }
 
 /// Ghostex fork: the look of a fenced block's own scrollbars (its height cap
@@ -133,6 +134,7 @@ impl PartialEq for TextViewStyle {
             && self.link_underline_on_hover == other.link_underline_on_hover
             && self.code_block_fit_content == other.code_block_fit_content
             && self.code_block_scrollbar == other.code_block_scrollbar
+            && self.code_block_padding == other.code_block_padding
     }
 }
 
@@ -194,6 +196,7 @@ impl TextViewStyle {
             link_underline_on_hover: false,
             code_block_fit_content: None,
             code_block_scrollbar: None,
+            code_block_padding: None,
         }
     }
 
@@ -254,6 +257,12 @@ impl TextViewStyle {
     /// (default) keeps the table scrollbar thickness and the theme colours.
     pub fn with_code_block_scrollbar(mut self, look: Option<CodeBlockScrollbar>) -> Self {
         self.code_block_scrollbar = look;
+        self
+    }
+
+    /// Ghostex fork: a fenced block's inner padding (default `p_3`, 12 px).
+    pub fn with_code_block_padding(mut self, padding: Option<Pixels>) -> Self {
+        self.code_block_padding = padding;
         self
     }
 
@@ -490,6 +499,11 @@ impl TextViewStyle {
     /// Ghostex fork: the look of a fenced block's own scrollbars.
     pub fn code_block_scrollbar(&self) -> Option<CodeBlockScrollbar> {
         self.code_block_scrollbar
+    }
+
+    /// Ghostex fork: a fenced block's inner padding, `None` for the default 12 px.
+    pub fn code_block_padding(&self) -> Option<Pixels> {
+        self.code_block_padding
     }
 
     /// The background painted behind selected text.
