@@ -841,36 +841,66 @@ impl Element for Inline {
         // Ghostex fork: `TextViewStyle::with_link_underline_on_hover` underlines
         // the link under the pointer only (the mouse-move listener below
         // repaints when the pointer enters or leaves one).
+        let view_style = GlobalState::global(cx)
+            .text_view_state()
+            .map(|state| state.read(cx).text_view_style.clone());
         let hovered_link = self
             .state
             .lock()
             .ok()
             .and_then(|state| state.hovered_index)
             .filter(|_| {
-                GlobalState::global(cx)
-                    .text_view_state()
-                    .is_some_and(|state| state.read(cx).text_view_style.link_underline_on_hover())
+                view_style
+                    .as_ref()
+                    .is_some_and(|style| style.link_underline_on_hover())
             })
             .and_then(|index| self.links.get(index))
             .map(|(range, _)| range.clone());
         let runs = match hovered_link {
-            Some(range) => text_runs(
-                self.text.len(),
-                &text_style,
-                &combine_highlights(
-                    self.highlights.clone(),
-                    [(
-                        range,
-                        InlineHighlight::from(HighlightStyle {
-                            underline: Some(gpui::UnderlineStyle {
-                                thickness: gpui::px(1.),
-                                ..Default::default()
-                            }),
+            Some(range) => {
+                let mut marks = vec![(
+                    range.clone(),
+                    InlineHighlight::from(HighlightStyle {
+                        underline: Some(gpui::UnderlineStyle {
+                            thickness: gpui::px(1.),
                             ..Default::default()
                         }),
-                    )],
-                ),
-            ),
+                        ..Default::default()
+                    }),
+                )];
+                // Ghostex fork: inline code inside the hovered link takes
+                // `with_link_code_hover_background` (Claude's accent tint).
+                if let Some(fill) = view_style
+                    .as_ref()
+                    .and_then(|style| style.link_code_hover_background())
+                {
+                    marks.extend(
+                        self.highlights
+                            .iter()
+                            .filter(|(_, mark)| {
+                                mark.font_family.is_some() || mark.font_size_scale.is_some()
+                            })
+                            .filter_map(|(code, _)| {
+                                let start = code.start.max(range.start);
+                                let end = code.end.min(range.end);
+                                (start < end).then(|| {
+                                    (
+                                        start..end,
+                                        InlineHighlight::from(HighlightStyle {
+                                            background_color: Some(fill),
+                                            ..Default::default()
+                                        }),
+                                    )
+                                })
+                            }),
+                    );
+                }
+                text_runs(
+                    self.text.len(),
+                    &text_style,
+                    &combine_highlights(self.highlights.clone(), marks),
+                )
+            }
             None => text_runs(self.text.len(), &text_style, &self.highlights),
         };
 

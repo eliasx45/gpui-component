@@ -84,6 +84,7 @@ pub struct TextViewStyle {
     code_block_fit_content: Option<Pixels>,
     code_block_scrollbar: Option<CodeBlockScrollbar>,
     code_block_padding: Option<Pixels>,
+    link_code_hover_background: Option<Hsla>,
 }
 
 /// Ghostex fork: the look of a fenced block's own scrollbars (its height cap
@@ -135,6 +136,7 @@ impl PartialEq for TextViewStyle {
             && self.code_block_fit_content == other.code_block_fit_content
             && self.code_block_scrollbar == other.code_block_scrollbar
             && self.code_block_padding == other.code_block_padding
+            && self.link_code_hover_background == other.link_code_hover_background
     }
 }
 
@@ -197,6 +199,7 @@ impl TextViewStyle {
             code_block_fit_content: None,
             code_block_scrollbar: None,
             code_block_padding: None,
+            link_code_hover_background: None,
         }
     }
 
@@ -263,6 +266,14 @@ impl TextViewStyle {
     /// Ghostex fork: a fenced block's inner padding (default `p_3`, 12 px).
     pub fn with_code_block_padding(mut self, padding: Option<Pixels>) -> Self {
         self.code_block_padding = padding;
+        self
+    }
+
+    /// Ghostex fork: the fill behind inline code inside the hovered link
+    /// (Claude's accent at 10 %). Needs `with_link_underline_on_hover`, which
+    /// is what tracks the hovered link. `None` adds none.
+    pub fn with_link_code_hover_background(mut self, fill: Option<Hsla>) -> Self {
+        self.link_code_hover_background = fill;
         self
     }
 
@@ -504,6 +515,11 @@ impl TextViewStyle {
     /// Ghostex fork: a fenced block's inner padding, `None` for the default 12 px.
     pub fn code_block_padding(&self) -> Option<Pixels> {
         self.code_block_padding
+    }
+
+    /// Ghostex fork: the fill behind inline code inside the hovered link.
+    pub fn link_code_hover_background(&self) -> Option<Hsla> {
+        self.link_code_hover_background
     }
 
     /// The background painted behind selected text.

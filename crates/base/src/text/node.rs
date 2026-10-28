@@ -3279,9 +3279,29 @@ const TABLE_SCROLLBAR_GAP: Pixels = px(3.);
 /// ([`TextViewStyle::table_scrollbar`]): a strip of its own below the table
 /// rather than over its last row, `thickness` thick, shown while the pointer
 /// is over the table. It draws nothing while the table fits.
-fn table_scrollbar(id: ElementId, scroll_handle: &ScrollHandle, thickness: Pixels) -> Div {
+///
+/// Ghostex fork: with a fenced block scrollbar look set
+/// ([`TextViewStyle::with_code_block_scrollbar`]) the thumb takes its colours,
+/// brightening on hover like a fence's own bar.
+fn table_scrollbar(
+    id: ElementId,
+    scroll_handle: &ScrollHandle,
+    thickness: Pixels,
+    look: Option<super::style::CodeBlockScrollbar>,
+) -> Div {
     let thumb = move |style: ScrollbarThumbStyle| {
-        style.width(thickness).inset(px(0.)).radius(thickness / 2.)
+        let style = style.width(thickness).inset(px(0.)).radius(thickness / 2.);
+        match look {
+            Some(look) => style.bg(look.thumb),
+            None => style,
+        }
+    };
+    let thumb_hover = move |style: ScrollbarThumbStyle| {
+        let style = style.width(thickness).inset(px(0.)).radius(thickness / 2.);
+        match look {
+            Some(look) => style.bg(look.thumb_hover),
+            None => style,
+        }
     };
     div()
         .relative()
@@ -3300,8 +3320,8 @@ fn table_scrollbar(id: ElementId, scroll_handle: &ScrollHandle, thickness: Pixel
                         .track_hover(|style| style.width(thickness))
                         .track_active(|style| style.width(thickness))
                         .thumb(thumb)
-                        .thumb_hover(thumb)
-                        .thumb_active(thumb)
+                        .thumb_hover(thumb_hover)
+                        .thumb_active(thumb_hover)
                 }),
         )
 }
@@ -4054,6 +4074,7 @@ impl BlockNode {
                     block_element_id("table-scrollbar", table.span, options.ix),
                     &scroll_handle,
                     thickness,
+                    style.code_block_scrollbar(),
                 ))
             })
             // Custom actions row (e.g. copy / download) rendered below the

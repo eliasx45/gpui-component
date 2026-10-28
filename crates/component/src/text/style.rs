@@ -128,6 +128,8 @@ pub struct TextViewStyle {
     pub code_block_scrollbar: Option<gpui_base::text::CodeBlockScrollbar>,
     /// Ghostex fork: a fenced block's inner padding. `None` keeps 12 px.
     pub code_block_padding: Option<Pixels>,
+    /// Ghostex fork: the fill behind inline code inside the hovered link.
+    pub link_code_hover_background: Option<Hsla>,
     /// Whether content-specific rendering should use dark-mode assets.
     pub is_dark: bool,
 }
@@ -166,6 +168,7 @@ impl Default for TextViewStyle {
             code_block_fit_content: None,
             code_block_scrollbar: None,
             code_block_padding: None,
+            link_code_hover_background: None,
             is_dark: false,
         }
     }
@@ -211,6 +214,7 @@ impl PartialEq for TextViewStyle {
             && self.code_block_fit_content == other.code_block_fit_content
             && self.code_block_scrollbar == other.code_block_scrollbar
             && self.code_block_padding == other.code_block_padding
+            && self.link_code_hover_background == other.link_code_hover_background
             && self.is_dark == other.is_dark
     }
 }
